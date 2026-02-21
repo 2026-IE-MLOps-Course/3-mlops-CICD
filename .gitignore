@@ -25,11 +25,16 @@ build/
 models/*
 !models/.gitkeep
 
-# Ignore data contents but keep folder structure
-data/*
+# Ignore all data files
+data/**
+
+# But keep folder structure
+!data/
 !data/raw/
 !data/processed/
 !data/inference/
+
+# Keep empty folders via .gitkeep
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/inference/.gitkeep
