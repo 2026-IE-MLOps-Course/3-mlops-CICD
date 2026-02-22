@@ -15,4 +15,5 @@ dependencies:
   - jupyter
   - ipykernel
   - pytest
+  - pytest-cov
   - pip
