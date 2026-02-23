@@ -25,6 +25,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RAW_DATA_PATH = PROJECT_ROOT / "data" / "raw" / "opiod_raw_data.csv"
 CLEAN_DATA_PATH = PROJECT_ROOT / "data" / "processed" / "clean.csv"
 MODEL_PATH = PROJECT_ROOT / "models" / "model.joblib"
+BINARY_SUM_COLS = ["A", "B", "C", "D", "E", "F", "H", "I",
+                   "J", "K", "L", "M", "N", "R", "S", "T", "Low_inc", "SURG"]
 
 # INSTRUCTOR MASTER BRANCH CONFIGURATION:
 # Hardcoded for now. In a later session, this will be moved entirely to config.yml.
@@ -37,7 +39,7 @@ SETTINGS = {
         "quantile_bin": ["rx_ds"],
         "categorical_onehot": [],
         "numeric_passthrough": [],
-        "binary_sum_cols": ["P_D", "P_P", "S_P"],
+        "binary_sum_cols": BINARY_SUM_COLS,
         "n_bins": 4,
     },
     "validation": {
