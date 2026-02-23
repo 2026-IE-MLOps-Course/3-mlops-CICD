@@ -17,7 +17,7 @@ from src.features import get_feature_preprocessor
 
 def _transformer_names(preprocessor: ColumnTransformer) -> list:
     """Helper to extract step names from a ColumnTransformer."""
-    return [name for name, _, _ in preprocessor.transformers_]
+    return [name for name, _, _ in preprocessor.transformers]
 
 
 # --------------------------------------------------------
