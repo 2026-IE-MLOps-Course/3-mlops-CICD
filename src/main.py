@@ -64,9 +64,24 @@ def main():
     print("[main.main] 3) SAVE PROCESSED CSV")
     save_csv(df_clean, CLEAN_DATA_PATH)
 
-    # Note: Assuming src/validate.py is fully implemented from your earlier sessions.
     print("[main.main] 4) VALIDATE")
-    validate_dataframe(df_clean, required_columns=[SETTINGS["target_column"]])
+    required_columns = (
+        [SETTINGS["target_column"]]
+        + SETTINGS["features"]["quantile_bin"]
+        + SETTINGS["features"]["categorical_onehot"]
+        + SETTINGS["features"]["numeric_passthrough"]
+        + SETTINGS["features"]["binary_sum_cols"]
+    )
+
+    validate_dataframe(
+        df_clean,
+        required_columns=required_columns,
+        check_missing_values=True,
+        target_column=SETTINGS["target_column"],
+        target_allowed_values=[
+            0, 1] if SETTINGS["problem_type"] == "classification" else None,
+        numeric_non_negative_cols=SETTINGS["features"]["quantile_bin"],
+    )
 
     print("[main.main] 5) SPLIT")
     X = df_clean.drop(columns=[SETTINGS["target_column"]])
@@ -119,6 +134,10 @@ def main():
         binary_sum_cols=SETTINGS["features"]["binary_sum_cols"],
         n_bins=SETTINGS["features"]["n_bins"],
     )
+
+    print("[main.main] Stopping after feature recipe build (course step: features only)")
+    print(preprocessor)
+    return
 
     # --- 8) TRAIN PIPELINE ---
     print("[main.main] 8) TRAIN")
