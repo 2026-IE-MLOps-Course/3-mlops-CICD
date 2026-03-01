@@ -244,13 +244,13 @@ def main():
 
     # 8.5) EVALUATE
     print("[main.main] 8.5) EVALUATE (VALIDATION)")
-    val_metric = evaluate_model(
+    val_metrics = evaluate_model(
         model=model_pipeline,
         X_eval=X_val,
         y_eval=y_val,
         problem_type=SETTINGS["problem_type"],
     )
-    print(f"[main.main] Validation metric={val_metric:.4f}")
+    print(f"[main.main] Validation metrics={val_metrics}")
 
     # 9) SAVE MODEL
     print("[main.main] 9) SAVE MODEL")

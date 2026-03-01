@@ -79,6 +79,7 @@ def train_model(
             max_iter=500,
             solver="liblinear",
             random_state=42,
+            class_weight="balanced",
         )
     elif pt == "regression":
         model = LinearRegression()

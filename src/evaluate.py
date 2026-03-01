@@ -12,7 +12,7 @@ TODO: Any temporary or hardcoded variable or parameter will be imported from con
 from typing import Optional
 import numpy as np
 import pandas as pd
-from sklearn.metrics import f1_score, mean_squared_error
+from sklearn.metrics import average_precision_score, mean_squared_error, roc_auc_score
 
 
 def _normalize_problem_type(problem_type: Optional[str]) -> str:
@@ -28,7 +28,7 @@ def _normalize_problem_type(problem_type: Optional[str]) -> str:
     return (problem_type or "").strip().lower()
 
 
-def evaluate_model(model, X_eval: pd.DataFrame, y_eval: pd.Series, problem_type: str) -> float:
+def evaluate_model(model, X_eval: pd.DataFrame, y_eval: pd.Series, problem_type: str) -> dict:
     """
     Inputs:
     - model: Fitted model or Pipeline with predict()
@@ -36,7 +36,7 @@ def evaluate_model(model, X_eval: pd.DataFrame, y_eval: pd.Series, problem_type:
     - y_eval: Evaluation target
     - problem_type: "regression" or "classification"
     Outputs:
-    - metric_value: RMSE for regression or F1 score for classification
+    - metric_dict: Dictionary of metrics (e.g., RMSE for regression or PR AUC for classification)
 
     Why this contract matters for reliable ML delivery:
     - Consistent evaluation supports objective go/no-go decisions and reduces quality regressions
@@ -63,19 +63,28 @@ def evaluate_model(model, X_eval: pd.DataFrame, y_eval: pd.Series, problem_type:
 
     # 3) Calculate metric
     if pt == "classification":
-        # Assumes target is binary {0,1} as validated in main.py
-        metric_value = float(f1_score(y_eval, y_pred, average="binary"))
-        # TODO: replace with logging later
-        print(f"[evaluate.evaluate_model] Metric=F1 value={metric_value:.4f}")
-        return metric_value
+        # AUC metrics require probabilities, not just hard class predictions
+        if not hasattr(model, "predict_proba"):
+            raise TypeError(
+                "Fatal: classification model must implement predict_proba()")
+
+        # Get probabilities for the positive class (1)
+        y_prob = model.predict_proba(X_eval)[:, 1]
+
+        metrics = {
+            "pr_auc": float(average_precision_score(y_eval, y_prob)),
+            "roc_auc": float(roc_auc_score(y_eval, y_prob))
+        }
+        print(f"[evaluate.evaluate_model] Metrics={metrics}")
+        return metrics
 
     elif pt == "regression":
-        # np.sqrt is universally compatible across all scikit-learn versions
-        metric_value = float(np.sqrt(mean_squared_error(y_eval, y_pred)))
-        # TODO: replace with logging later
-        print(
-            f"[evaluate.evaluate_model] Metric=RMSE value={metric_value:.4f}")
-        return metric_value
+        y_pred = model.predict(X_eval)
+        metrics = {
+            "rmse": float(np.sqrt(mean_squared_error(y_eval, y_pred)))
+        }
+        print(f"[evaluate.evaluate_model] Metrics={metrics}")
+        return metrics
 
     else:
         raise ValueError(
