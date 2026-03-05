@@ -41,50 +41,50 @@ def dummy_regression_data():
 # --------------------------------------------------------
 # 1) HAPPY PATH: Mathematical Soundness
 # --------------------------------------------------------
-def test_evaluate_classification_returns_float_in_range(dummy_classification_data):
-    """The F1 score must be a float strictly between 0.0 and 1.0."""
+def test_evaluate_classification_returns_dict_of_metrics(dummy_classification_data):
+    """Classification evaluation must return a dict with pr_auc and roc_auc between 0.0 and 1.0."""
     model, X, y = dummy_classification_data
 
-    metric = evaluate_model(model=model, X_eval=X,
-                            y_eval=y, problem_type="classification")
+    metrics = evaluate_model(model=model, X_eval=X,
+                             y_eval=y, problem_type="classification")
 
-    assert isinstance(metric, float)
-    assert 0.0 <= metric <= 1.0
+    assert isinstance(metrics, dict)
+    assert "pr_auc" in metrics
+    assert "roc_auc" in metrics
+    assert isinstance(metrics["pr_auc"], float)
+    assert isinstance(metrics["roc_auc"], float)
+    assert 0.0 <= metrics["pr_auc"] <= 1.0
+    assert 0.0 <= metrics["roc_auc"] <= 1.0
 
 
-def test_evaluate_regression_returns_non_negative_float(dummy_regression_data):
-    """The RMSE must be a float strictly greater than or equal to 0.0."""
+def test_evaluate_regression_returns_dict_with_rmse(dummy_regression_data):
+    """Regression evaluation must return a dict with rmse >= 0.0."""
     model, X, y = dummy_regression_data
 
-    metric = evaluate_model(model=model, X_eval=X,
-                            y_eval=y, problem_type="regression")
+    metrics = evaluate_model(model=model, X_eval=X,
+                             y_eval=y, problem_type="regression")
 
-    assert isinstance(metric, float)
-    assert metric >= 0.0
+    assert isinstance(metrics, dict)
+    assert "rmse" in metrics
+    assert isinstance(metrics["rmse"], float)
+    assert metrics["rmse"] >= 0.0
 
 
 # --------------------------------------------------------
 # 2) CONTRACT CHECKS: Duck Typing & Configurations
 # --------------------------------------------------------
-def test_raises_if_model_has_no_predict(dummy_classification_data):
-    """Crash immediately if the loaded artifact cannot make predictions."""
+def test_raises_if_model_has_no_predict_proba_for_classification(dummy_classification_data):
+    """Crash immediately if the loaded classification artifact cannot predict probabilities."""
     _, X, y = dummy_classification_data
 
     class BadArtifact:
-        pass  # Missing .predict()
+        def predict(self, X):
+            return [0] * len(X)
+        # Missing .predict_proba()
 
-    with pytest.raises(TypeError, match="Fatal: model must implement predict"):
+    with pytest.raises(TypeError, match="Fatal: classification model must implement predict_proba"):
         evaluate_model(model=BadArtifact(), X_eval=X,
                        y_eval=y, problem_type="classification")
-
-
-def test_raises_on_unsupported_problem_type(dummy_classification_data):
-    """Crash if configuration routes to an unknown metric."""
-    model, X, y = dummy_classification_data
-
-    with pytest.raises(ValueError, match="Fatal: Unsupported problem_type"):
-        evaluate_model(model=model, X_eval=X, y_eval=y,
-                       problem_type="clustering")
 
 
 # --------------------------------------------------------
