@@ -1,10 +1,70 @@
-# MLOps Project Configuration
-# This file will eventually control paths, hyperparameters, and toggles.
+# config.yaml
+# Single source of truth for non-secret runtime settings
+# Secrets belong in .env only NOT HERE! (example: WANDB_API_KEY)
 
-data:
-  raw: "data/raw/dataset.csv"
-  processed: "data/processed/clean.csv"
+paths:
+  raw_data: "data/raw/opiod_raw_data.csv"
+  processed_data: "data/processed/clean.csv"
+  model_artifact: "models/model.joblib"
+  inference_data: "data/inference/opioid_infer_01.csv"
+  predictions_artifact: "reports/predictions.csv"
 
-train:
-  test_size: 0.2
-  seed: 42
+logging:
+  level: "INFO"      # "DEBUG", "INFO", "WARNING", "ERROR"
+  format: "text"     # keep "text" for class, can add "json" later
+
+problem:
+  target_column: "OD"
+  problem_type: "classification"   # "classification" or "regression"
+  identifier_column: "ID"
+
+split:
+  test_size: 0.05
+  val_size: 0.15
+  random_state: 42
+
+training:
+  classification:
+    model_type: "logistic_regression"
+    max_iter: 500
+    solver: "liblinear"
+    random_state: 42
+    class_weight: "balanced"
+  regression:
+    model_type: "linear_regression"
+
+features:
+  quantile_bin:
+    - "rx_ds"
+  categorical_onehot: []
+  numeric_passthrough: []
+  binary_sum_cols:
+    - "A"
+    - "B"
+    - "C"
+    - "D"
+    - "E"
+    - "F"
+    - "H"
+    - "I"
+    - "J"
+    - "K"
+    - "L"
+    - "M"
+    - "N"
+    - "R"
+    - "S"
+    - "T"
+    - "Low_inc"
+    - "SURG"
+  n_bins: 4
+
+validation:
+  numeric_non_negative_cols:
+    - "rx_ds"
+  check_missing_values: false
+
+run:
+  include_proba_if_classification: true
+  overwrite_outputs: true
+
