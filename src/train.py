@@ -1,15 +1,17 @@
 # src/train.py
 """
-Educational Goal:
-- Why this module exists in an MLOps system: Encapsulate training so models are reproducible and swappable without rewiring the pipeline
-- Responsibility (separation of concerns): Combines the feature recipe and algorithm into a single Pipeline artifact
-- Pipeline contract: Inputs are the train split, problem type, and preprocessor. Output is a fully fitted Pipeline artifact
+Educational goal
+- Encapsulate model training so orchestration (main) stays clean
+- Make model choice and hyperparameters configurable via config.yaml
+- Return a single fitted Pipeline artifact that can be saved and reused
 
-TODO: Replace print statements with standard library logging in a later session
-TODO: Any temporary or hardcoded variable or parameter will be imported from config.yml in a later session
+Design choices for simplicity
+- Prefer functions over classes
+- Use a small model switch based on model_type
+- Keep scikit-learn Pipeline as the core artifact
 """
 
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import pandas as pd
 from sklearn.compose import ColumnTransformer
@@ -18,15 +20,6 @@ from sklearn.pipeline import Pipeline
 
 
 def _normalize_problem_type(problem_type: Optional[str]) -> str:
-    """
-    Inputs:
-    - problem_type: Raw problem type string
-    Outputs:
-    - normalized: "classification" or "regression"
-
-    Why this contract matters for reliable ML delivery:
-    - Strict normalization avoids silent configuration errors and makes failures actionable
-    """
     return (problem_type or "").strip().lower()
 
 
@@ -35,70 +28,81 @@ def train_model(
     y_train: pd.Series,
     preprocessor: ColumnTransformer,
     problem_type: str,
+    model_params: Optional[Dict[str, Any]] = None,
 ) -> Pipeline:
     """
-    Inputs:
-    - X_train: Training features (already split, no target column)
-    - y_train: Training target
-    - preprocessor: ColumnTransformer recipe (should not be fitted here)
+    Train a scikit-learn Pipeline.
+
+    Inputs
+    - X_train: Features for training (target removed)
+    - y_train: Target values
+    - preprocessor: ColumnTransformer describing the feature recipe
     - problem_type: "classification" or "regression"
-    Outputs:
-    - pipeline: Trained scikit-learn Pipeline object
+    - model_params: dictionary from config.yaml training.<problem_type>
 
-    Why this contract matters for reliable ML delivery:
-    - Fitting happens on training data only, preventing leakage and inflated performance estimates
-    - A single fitted pipeline artifact ensures training and inference run the exact same steps
+    Output
+    - A fitted scikit-learn Pipeline artifact
     """
-    print(
-        # TODO: replace with logging later
-        f"[train.train_model] Training model pipeline for problem_type={problem_type}")
+    print(f"[train] Training model pipeline for problem_type={problem_type}")
 
-    # 1) Fail-fast structural guardrails
     if X_train is None or len(X_train) == 0:
-        raise ValueError("Fatal: X_train is empty. Cannot train a model.")
-
+        raise ValueError("X_train is empty. Cannot train a model")
     if y_train is None or len(y_train) == 0:
-        raise ValueError("Fatal: y_train is empty. Cannot train a model.")
-
+        raise ValueError("y_train is empty. Cannot train a model")
     if len(X_train) != len(y_train):
-        raise ValueError(
-            f"Fatal: X_train rows ({len(X_train)}) do not match y_train rows ({len(y_train)})."
-        )
-
+        raise ValueError(f"X_train rows ({len(X_train)}) do not match y_train rows ({len(y_train)})")
     if not isinstance(preprocessor, ColumnTransformer):
-        raise TypeError(
-            f"Fatal: preprocessor must be a ColumnTransformer. Got type={type(preprocessor)}"
-        )
+        raise TypeError(f"preprocessor must be a ColumnTransformer. Got type={type(preprocessor)}")
 
-    # 2) Model selection
     pt = _normalize_problem_type(problem_type)
 
+    # Copy so we never mutate the original config dictionary
+    params: Dict[str, Any] = dict(model_params) if isinstance(model_params, dict) else {}
+
+    # model_type is a routing key, not a constructor argument
+    model_type = str(params.pop("model_type", "") or "").strip().lower()
+
     if pt == "classification":
-        # Stable default for small datasets and classroom runs
-        model = LogisticRegression(
-            max_iter=500,
-            solver="liblinear",
-            random_state=42,
-            class_weight="balanced",
-        )
+        if not model_type:
+            model_type = "logistic_regression"
+
+        if model_type != "logistic_regression":
+            raise ValueError(
+                f"Unsupported classification model_type '{model_type}'. Supported: 'logistic_regression'"
+            )
+
+        try:
+            model = LogisticRegression(**params)
+        except TypeError as e:
+            # This usually means the YAML contains an invalid hyperparameter name
+            raise ValueError(
+                "Invalid classification hyperparameters in config.yaml under training.classification. "
+                f"Constructor error: {e}. "
+                "Fix the keys or remove the unsupported parameter."
+            ) from e
+
     elif pt == "regression":
-        model = LinearRegression()
+        if not model_type:
+            model_type = "linear_regression"
+
+        if model_type != "linear_regression":
+            raise ValueError(
+                f"Unsupported regression model_type '{model_type}'. Supported: 'linear_regression'"
+            )
+
+        try:
+            model = LinearRegression(**params)
+        except TypeError as e:
+            raise ValueError(
+                "Invalid regression hyperparameters in config.yaml under training.regression. "
+                f"Constructor error: {e}. "
+                "Fix the keys or remove the unsupported parameter."
+            ) from e
+
     else:
-        raise ValueError(
-            f"Fatal: Unsupported problem_type '{problem_type}'. Use 'classification' or 'regression'."
-        )
+        raise ValueError("Unsupported problem_type. Use 'classification' or 'regression'")
 
-    # 3) Build the deployable artifact
-    # We bundle preprocessing rules and the model into one object that can be saved and reused in inference
-    pipeline = Pipeline(
-        steps=[
-            ("preprocess", preprocessor),
-            ("model", model),
-        ]
-    )
-
-    # 4) Execute training
-    # This is the only place where .fit() is called in the system
+    pipeline = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
     pipeline.fit(X_train, y_train)
 
     return pipeline

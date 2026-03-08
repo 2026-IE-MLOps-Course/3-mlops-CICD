@@ -1,17 +1,29 @@
 # src/main.py
 """
-Educational Goal:
-- Why this module exists in an MLOps system: Orchestrate the pipeline in a readable entry point
-- Responsibility (separation of concerns): Coordinate steps, handle splits, inject configuration, and delegate work to modules
-- Pipeline contract (inputs and outputs): Produces a cleaned dataset, a trained pipeline artifact, and an inference predictions artifact
+Educational goal
+- Show how an MLOps repo separates orchestration (main) from implementation (src modules)
+- Show how a system becomes configurable without editing code by moving runtime settings into config.yaml
+- Establish a single "golden path" entrypoint that can later be wrapped by CI and deployment
 
-TODO: Replace print statements with standard library logging in a later session
-TODO: Any temporary or hardcoded variable or parameter will be imported from config.yml in a later session
+What this module owns
+- Load and validate config.yaml
+- Resolve repo-relative paths
+- Orchestrate: load -> clean -> validate -> split -> feature recipe -> train -> evaluate -> save -> infer
+
+What this module does not own
+- Data cleaning rules (src/clean_data.py)
+- Feature engineering implementations (src/features.py)
+- Training algorithm implementation (src/train.py)
+- Evaluation metrics (src/evaluate.py)
+- Inference logic (src/infer.py)
+- Validation rules (src/validate.py)
 """
 
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+import yaml
 from sklearn.model_selection import train_test_split
 
 from src.clean_data import clean_dataframe
@@ -23,43 +35,105 @@ from src.train import train_model
 from src.utils import save_csv, save_model
 from src.validate import validate_dataframe
 
-# --------------------------------------------------------
-# PATHS & CONFIGURATION
-# --------------------------------------------------------
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-RAW_DATA_PATH = PROJECT_ROOT / "data" / "raw" / "opiod_raw_data.csv"
-CLEAN_DATA_PATH = PROJECT_ROOT / "data" / "processed" / "clean.csv"
-MODEL_PATH = PROJECT_ROOT / "models" / "model.joblib"
-INFERENCE_DATA_PATH = PROJECT_ROOT / "data" / "inference" / "opioid_infer_01.csv"
-PREDICTIONS_PATH = PROJECT_ROOT / "reports" / "predictions.csv"
+# -----------------------------
+# Config loading and validation
+# -----------------------------
+def load_config(config_path: Path) -> Dict[str, Any]:
+    """
+    Load YAML configuration from disk.
 
-BINARY_SUM_COLS = [
-    "A", "B", "C", "D", "E", "F",
-    "H", "I", "J", "K", "L", "M", "N",
-    "R", "S", "T",
-    "Low_inc", "SURG",
-]
+    Why this exists
+    - Centralizing config loading prevents "config drift" where different modules parse YAML differently
+    - Fail fast with clear messages when config.yaml is missing or malformed
+    """
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found at: {config_path}")
 
-SETTINGS = {
-    "is_example_config": False,
-    "target_column": "OD",
-    "problem_type": "classification",
-    "split": {"test_size": 0.05, "val_size": 0.15, "random_state": 42},
-    "features": {
-        "quantile_bin": ["rx_ds"],
-        "categorical_onehot": [],
-        "numeric_passthrough": [],
-        "binary_sum_cols": BINARY_SUM_COLS,
-        "n_bins": 4,
-    },
-    "validation": {
-        "numeric_non_negative_cols": ["rx_ds"],
-    },
-}
+    with config_path.open("r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    if not isinstance(cfg, dict):
+        raise ValueError("config.yaml must parse into a dictionary at the top level")
+
+    return cfg
 
 
-def _three_way_split(
+def require_section(cfg: Dict[str, Any], section: str) -> Dict[str, Any]:
+    """
+    Enforce a required top-level config section.
+
+    Why this exists
+    - KeyError messages are unhelpful for students
+    - This produces an actionable error tied to config.yaml structure
+    """
+    value = cfg.get(section)
+    if not isinstance(value, dict):
+        raise ValueError(f"config.yaml must contain a top-level '{section}' mapping")
+    return value
+
+
+def require_str(section: Dict[str, Any], key: str) -> str:
+    value = section.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"config.yaml: '{key}' must be a non-empty string")
+    return value.strip()
+
+
+def require_float(section: Dict[str, Any], key: str) -> float:
+    value = section.get(key)
+    try:
+        return float(value)
+    except Exception as e:
+        raise ValueError(f"config.yaml: '{key}' must be a number. Got '{value}'") from e
+
+
+def require_int(section: Dict[str, Any], key: str) -> int:
+    value = section.get(key)
+    try:
+        return int(value)
+    except Exception as e:
+        raise ValueError(f"config.yaml: '{key}' must be an integer. Got '{value}'") from e
+
+
+def require_list(section: Dict[str, Any], key: str) -> List[str]:
+    value = section.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"config.yaml: '{key}' must be a list. Got type={type(value)}")
+    # Keep only non-empty strings, preserve order
+    out: List[str] = []
+    for item in value:
+        if isinstance(item, str) and item.strip():
+            out.append(item.strip())
+    return out
+
+
+def normalize_problem_type(problem_type: Optional[str]) -> str:
+    return (problem_type or "").strip().lower()
+
+
+def resolve_repo_path(project_root: Path, relative_path: str) -> Path:
+    """
+    Resolve a config path relative to the repo root.
+
+    This makes the repo reproducible across machines because we never rely on the current working directory.
+    """
+    if not isinstance(relative_path, str) or not relative_path.strip():
+        raise ValueError("config.yaml: path values must be non-empty strings")
+    return project_root / relative_path.strip()
+
+
+def dedupe_preserve_order(items: List[str]) -> List[str]:
+    # Standard trick: dict preserves insertion order in modern Python
+    return list(dict.fromkeys(items))
+
+
+# -----------------------------
+# Data splitting
+# -----------------------------
+def three_way_split(
     X: pd.DataFrame,
     y: pd.Series,
     *,
@@ -67,247 +141,261 @@ def _three_way_split(
     val_size: float,
     random_state: int,
     stratify: bool,
-):
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, pd.Series]:
     """
-    Why this contract matters for reliable ML delivery
-    - Train learns, validation guides decisions, test audits the final result
+    Split into train, validation, test.
+
+    Why it matters
+    - Train is for learning
+    - Validation is for decision making during development
+    - Test is the final audit, used sparingly
     """
     if test_size <= 0 or val_size <= 0 or (test_size + val_size) >= 1.0:
-        raise ValueError(
-            "Fatal: split sizes must satisfy 0 < test_size, 0 < val_size, and test_size + val_size < 1"
-        )
+        raise ValueError("Split sizes must satisfy: 0 < test_size, 0 < val_size, and test_size + val_size < 1")
 
     stratify_y = y if stratify else None
 
     try:
         X_temp, X_test, y_temp, y_test = train_test_split(
-            X,
-            y,
-            test_size=test_size,
-            random_state=random_state,
-            stratify=stratify_y,
+            X, y, test_size=test_size, random_state=random_state, stratify=stratify_y
         )
 
         relative_val_size = val_size / (1.0 - test_size)
         stratify_temp = y_temp if stratify else None
 
         X_train, X_val, y_train, y_val = train_test_split(
-            X_temp,
-            y_temp,
-            test_size=relative_val_size,
-            random_state=random_state,
-            stratify=stratify_temp,
+            X_temp, y_temp, test_size=relative_val_size, random_state=random_state, stratify=stratify_temp
         )
 
         return X_train, X_val, X_test, y_train, y_val, y_test
 
     except ValueError as e:
-        print(
-            f"[main] Warning: Stratified split failed: {e}. Falling back to random split.")
+        # Most common reason: stratified split fails on very small datasets
+        print(f"[main] Warning: stratified split failed: {e}")
+        print("[main] Falling back to non-stratified split")
 
-        X_temp, X_test, y_temp, y_test = train_test_split(
-            X,
-            y,
-            test_size=test_size,
-            random_state=random_state,
-        )
+        X_temp, X_test, y_temp, y_test = train_test_split(X, y, test_size=test_size, random_state=random_state)
 
         relative_val_size = val_size / (1.0 - test_size)
         X_train, X_val, y_train, y_val = train_test_split(
-            X_temp,
-            y_temp,
-            test_size=relative_val_size,
-            random_state=random_state,
+            X_temp, y_temp, test_size=relative_val_size, random_state=random_state
         )
 
         return X_train, X_val, X_test, y_train, y_val, y_test
 
 
-def _get_feature_columns_from_settings() -> list[str]:
-    cols = (
-        SETTINGS["features"]["quantile_bin"]
-        + SETTINGS["features"]["categorical_onehot"]
-        + SETTINGS["features"]["numeric_passthrough"]
-        + SETTINGS["features"]["binary_sum_cols"]
+def main() -> None:
+    print("[main] Starting pipeline")
+
+    # -----------------------------
+    # Load and validate config.yaml
+    # -----------------------------
+    project_root = Path(__file__).resolve().parents[1]
+    cfg = load_config(project_root / "config.yaml")
+
+    paths_cfg = require_section(cfg, "paths")
+    problem_cfg = require_section(cfg, "problem")
+    split_cfg = require_section(cfg, "split")
+    features_cfg = require_section(cfg, "features")
+    validation_cfg = require_section(cfg, "validation")
+    run_cfg = require_section(cfg, "run")
+    training_cfg = require_section(cfg, "training")
+
+    problem_type = normalize_problem_type(require_str(problem_cfg, "problem_type"))
+    if problem_type not in {"classification", "regression"}:
+        raise ValueError("config.yaml: problem.problem_type must be 'classification' or 'regression'")
+
+    target_column = require_str(problem_cfg, "target_column")
+    identifier_column = require_str(problem_cfg, "identifier_column")
+
+    # Resolve paths
+    raw_data_path = resolve_repo_path(project_root, require_str(paths_cfg, "raw_data"))
+    processed_data_path = resolve_repo_path(project_root, require_str(paths_cfg, "processed_data"))
+    model_artifact_path = resolve_repo_path(project_root, require_str(paths_cfg, "model_artifact"))
+    inference_data_path = resolve_repo_path(project_root, require_str(paths_cfg, "inference_data"))
+    predictions_artifact_path = resolve_repo_path(project_root, require_str(paths_cfg, "predictions_artifact"))
+
+    # Split settings
+    test_size = require_float(split_cfg, "test_size")
+    val_size = require_float(split_cfg, "val_size")
+    random_state = require_int(split_cfg, "random_state")
+
+    # Feature columns
+    quantile_bin_cols = require_list(features_cfg, "quantile_bin")
+    categorical_onehot_cols = require_list(features_cfg, "categorical_onehot")
+    numeric_passthrough_cols = require_list(features_cfg, "numeric_passthrough")
+    binary_sum_cols = require_list(features_cfg, "binary_sum_cols")
+    n_bins = require_int(features_cfg, "n_bins")
+
+    configured_cols = dedupe_preserve_order(
+        quantile_bin_cols + categorical_onehot_cols + numeric_passthrough_cols + binary_sum_cols
     )
-    return list(dict.fromkeys(cols))
+    if not configured_cols:
+        raise ValueError("config.yaml: features must define at least 1 column across the feature lists")
 
+    # Validation config
+    numeric_non_negative_cols = require_list(validation_cfg, "numeric_non_negative_cols")
+    check_missing_values = bool(validation_cfg.get("check_missing_values", False))
 
-def main():
-    print("[main.main] Starting pipeline")
+    # Run config
+    include_proba_if_classification = bool(run_cfg.get("include_proba_if_classification", True))
 
-    if SETTINGS.get("is_example_config", False):
-        raise ValueError(
-            "Fatal: SETTINGS is an example. Update target_column and feature lists for your dataset, then set 'is_example_config': False"
-        )
+    # Training config for this problem type
+    model_params = training_cfg.get(problem_type, {})
+    if model_params is None:
+        model_params = {}
+    if not isinstance(model_params, dict):
+        raise ValueError(f"config.yaml: training.{problem_type} must be a mapping")
 
-    # 1) LOAD
-    print("[main.main] 1) LOAD")
-    df_raw = load_raw_data(RAW_DATA_PATH)
+    # -----------------------------
+    # 1) Load raw training data
+    # -----------------------------
+    print("[main] 1) LOAD raw data")
+    df_raw = load_raw_data(raw_data_path)
 
-    # 2) CLEAN (training mode, target required)
-    print("[main.main] 2) CLEAN (TRAINING DATA)")
-    df_clean = clean_dataframe(df_raw, target_column=SETTINGS["target_column"])
+    # -----------------------------
+    # 2) Clean training data
+    # -----------------------------
+    print("[main] 2) CLEAN training data")
+    df_clean = clean_dataframe(df_raw, target_column=target_column)
 
-    # 3) SAVE PROCESSED CSV
-    print("[main.main] 3) SAVE PROCESSED CSV")
-    save_csv(df_clean, CLEAN_DATA_PATH)
+    # -----------------------------
+    # 3) Save processed data
+    # -----------------------------
+    print("[main] 3) SAVE processed data")
+    save_csv(df_clean, processed_data_path)
 
-    # 4) VALIDATE (training mode)
-    print("[main.main] 4) VALIDATE (TRAINING DATA)")
-    required_columns = [SETTINGS["target_column"]] + \
-        _get_feature_columns_from_settings()
-
+    # -----------------------------
+    # 4) Validate training data
+    # -----------------------------
+    print("[main] 4) VALIDATE training data")
+    required_columns = [target_column] + configured_cols
     validate_dataframe(
         df=df_clean,
         required_columns=required_columns,
-        check_missing_values=False,
-        target_column=SETTINGS["target_column"],
-        target_allowed_values=[
-            0, 1] if SETTINGS["problem_type"] == "classification" else None,
-        numeric_non_negative_cols=SETTINGS["validation"]["numeric_non_negative_cols"],
+        check_missing_values=check_missing_values,
+        target_column=target_column,
+        target_allowed_values=[0, 1] if problem_type == "classification" else None,
+        numeric_non_negative_cols=numeric_non_negative_cols,
     )
 
-    # 5) SPLIT
-    print("[main.main] 5) SPLIT INTO TRAIN, VALIDATION, TEST")
-    X_full = df_clean.drop(columns=[SETTINGS["target_column"]])
-    y = df_clean[SETTINGS["target_column"]]
+    # -----------------------------
+    # 5) Split
+    # -----------------------------
+    print("[main] 5) SPLIT train/val/test")
+    X_full = df_clean.drop(columns=[target_column])
+    y = df_clean[target_column]
 
-    identifier_col = "ID" if "ID" in X_full.columns else None
-    if identifier_col:
-        X_full_no_id = X_full.drop(columns=[identifier_col])
-    else:
-        X_full_no_id = X_full
+    # Keep identifier only for traceability, never as a feature
+    identifier_col = identifier_column if identifier_column in X_full.columns else None
+    X_features = X_full.drop(columns=[identifier_col]) if identifier_col else X_full
 
-    X_train, X_val, X_test, y_train, y_val, y_test = _three_way_split(
-        X_full_no_id,
+    X_train, X_val, X_test, y_train, y_val, y_test = three_way_split(
+        X_features,
         y,
-        test_size=SETTINGS["split"]["test_size"],
-        val_size=SETTINGS["split"]["val_size"],
-        random_state=SETTINGS["split"]["random_state"],
-        stratify=(SETTINGS["problem_type"] == "classification"),
+        test_size=test_size,
+        val_size=val_size,
+        random_state=random_state,
+        stratify=(problem_type == "classification"),
     )
 
-    print("[main.main] Split sizes")
-    print("Train:", X_train.shape, "Validation:",
-          X_val.shape, "Test:", X_test.shape)
+    print("[main] Split sizes")
+    print("Train:", X_train.shape, "Validation:", X_val.shape, "Test:", X_test.shape)
 
     if len(X_test) == 0:
-        raise ValueError(
-            "Fatal: test split is empty. Check split ratios and dataset size.")
+        raise ValueError("Test split is empty. Check split ratios and dataset size")
 
-    # 6) FAIL FAST FEATURE CHECKS
-    configured_cols = _get_feature_columns_from_settings()
-    if not configured_cols:
-        raise ValueError(
-            "Fatal: No feature columns configured in SETTINGS['features']")
+    # Fail fast on column mismatches
+    missing_cols = sorted(set(configured_cols) - set(X_train.columns))
+    if missing_cols:
+        raise ValueError(f"Configured feature columns not found in the dataset: {missing_cols}")
 
-    missing = set(configured_cols) - set(X_train.columns)
-    if missing:
-        raise ValueError(
-            f"Fatal: Configured columns not found in dataset: {sorted(missing)}")
-
-    for col in SETTINGS["features"]["quantile_bin"]:
+    for col in quantile_bin_cols:
         if not pd.api.types.is_numeric_dtype(X_train[col]):
-            raise ValueError(
-                f"Fatal: Column '{col}' must be numeric for quantile binning. Found dtype={X_train[col].dtype}"
-            )
+            raise ValueError(f"Column '{col}' must be numeric for quantile binning. Found dtype={X_train[col].dtype}")
 
-    # 7) BUILD FEATURE RECIPE
-    print("[main.main] 7) BUILD FEATURE RECIPE")
+    # -----------------------------
+    # 6) Build feature preprocessor
+    # -----------------------------
+    print("[main] 6) BUILD feature recipe")
     preprocessor = get_feature_preprocessor(
-        quantile_bin_cols=SETTINGS["features"]["quantile_bin"],
-        categorical_onehot_cols=SETTINGS["features"]["categorical_onehot"],
-        numeric_passthrough_cols=SETTINGS["features"]["numeric_passthrough"],
-        binary_sum_cols=SETTINGS["features"]["binary_sum_cols"],
-        n_bins=SETTINGS["features"]["n_bins"],
+        quantile_bin_cols=quantile_bin_cols,
+        categorical_onehot_cols=categorical_onehot_cols,
+        numeric_passthrough_cols=numeric_passthrough_cols,
+        binary_sum_cols=binary_sum_cols,
+        n_bins=n_bins,
     )
 
-    # 8) TRAIN
-    print("[main.main] 8) TRAIN")
+    # -----------------------------
+    # 7) Train
+    # -----------------------------
+    print("[main] 7) TRAIN model pipeline")
     model_pipeline = train_model(
         X_train=X_train,
         y_train=y_train,
         preprocessor=preprocessor,
-        problem_type=SETTINGS["problem_type"],
+        problem_type=problem_type,
+        model_params=model_params,
     )
 
-    # 8.5) EVALUATE
-    print("[main.main] 8.5) EVALUATE (VALIDATION)")
+    # -----------------------------
+    # 8) Evaluate (validation)
+    # -----------------------------
+    print("[main] 8) EVALUATE on validation split")
     val_metrics = evaluate_model(
         model=model_pipeline,
         X_eval=X_val,
         y_eval=y_val,
-        problem_type=SETTINGS["problem_type"],
+        problem_type=problem_type,
     )
-    print(f"[main.main] Validation metrics={val_metrics}")
+    print(f"[main] Validation metrics: {val_metrics}")
 
-    # 9) SAVE MODEL
-    print("[main.main] 9) SAVE MODEL")
-    save_model(model_pipeline, MODEL_PATH)
+    # -----------------------------
+    # 9) Save model artifact
+    # -----------------------------
+    print("[main] 9) SAVE model artifact")
+    save_model(model_pipeline, model_artifact_path)
 
-    # 10) INFERENCE (NEW DATA FILE)
-    print("[main.main] 10) INFERENCE (NEW DATA FILE)")
+    # -----------------------------
+    # 10) Inference on new data
+    # -----------------------------
+    print("[main] 10) INFER on new data file")
+    if not inference_data_path.exists():
+        raise FileNotFoundError(f"Inference file not found at: {inference_data_path}")
 
-    if not INFERENCE_DATA_PATH.exists():
-        raise FileNotFoundError(
-            f"Inference file not found at {INFERENCE_DATA_PATH}. "
-            "Place a file like opioid_infer_01.csv under data/inference"
-        )
-
-    # Load new unseen data
-    df_infer_raw = load_raw_data(INFERENCE_DATA_PATH)
-
-    # Clean in inference mode (no target required)
+    df_infer_raw = load_raw_data(inference_data_path)
     df_infer_clean = clean_dataframe(df_infer_raw, target_column=None)
-
-    # Validate feature contract only
-    infer_required_columns = (
-        SETTINGS["features"]["quantile_bin"]
-        + SETTINGS["features"]["categorical_onehot"]
-        + SETTINGS["features"]["numeric_passthrough"]
-        + SETTINGS["features"]["binary_sum_cols"]
-    )
-    infer_required_columns = list(dict.fromkeys(infer_required_columns))
 
     validate_dataframe(
         df=df_infer_clean,
-        required_columns=infer_required_columns,
-        check_missing_values=False,
+        required_columns=configured_cols,
+        check_missing_values=check_missing_values,
         target_column=None,
         target_allowed_values=None,
-        numeric_non_negative_cols=SETTINGS["validation"]["numeric_non_negative_cols"],
+        numeric_non_negative_cols=numeric_non_negative_cols,
     )
 
-    # Keep ID for traceability but never send it into the model
-    identifier_col = "ID" if "ID" in df_infer_clean.columns else None
-    X_infer = df_infer_clean.drop(
-        columns=[identifier_col]) if identifier_col else df_infer_clean
+    infer_identifier_col = identifier_column if identifier_column in df_infer_clean.columns else None
+    X_infer = df_infer_clean.drop(columns=[infer_identifier_col]) if infer_identifier_col else df_infer_clean
 
-    # Run inference through the trained pipeline artifact
-    df_predictions = run_inference(
-        model=model_pipeline,
-        X_infer=X_infer,
-        include_proba=(SETTINGS["problem_type"] == "classification"),
-    )
+    # Correct logic: only include probabilities when classification AND config allows it
+    include_proba = (problem_type == "classification") and include_proba_if_classification
 
-    # Re-attach ID for audit joins
-    if identifier_col:
-        df_predictions.insert(
-            0, identifier_col, df_infer_clean[identifier_col].values)
+    df_predictions = run_inference(model=model_pipeline, X_infer=X_infer, include_proba=include_proba)
 
-    print("[main.main] Inference results")
+    # Reattach identifier for business traceability
+    if infer_identifier_col:
+        df_predictions.insert(0, infer_identifier_col, df_infer_clean[infer_identifier_col].values)
+
+    print("[main] Inference preview")
     print(df_predictions.head(10))
 
-    # Persist predictions as artifact
-    save_csv(df_predictions, PREDICTIONS_PATH)
+    save_csv(df_predictions, predictions_artifact_path)
 
-    print(f"[main.main] Wrote predictions artifact to {PREDICTIONS_PATH}")
-
-    print("[main.main] Done")
-    print(f"[main.main] Wrote {CLEAN_DATA_PATH}")
-    print(f"[main.main] Wrote {MODEL_PATH}")
-    print(f"[main.main] Wrote {PREDICTIONS_PATH}")
+    print("[main] Done")
+    print(f"[main] Wrote processed data: {processed_data_path}")
+    print(f"[main] Wrote model artifact: {model_artifact_path}")
+    print(f"[main] Wrote predictions: {predictions_artifact_path}")
 
 
 if __name__ == "__main__":
