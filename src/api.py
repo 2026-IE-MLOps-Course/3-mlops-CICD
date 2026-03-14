@@ -159,7 +159,7 @@ def _configured_feature_columns(cfg: Dict[str, Any]) -> List[str]:
 
 
 # -------------------------------------------------------------------
-# 3) App + global state (beginner friendly, no classes)
+# 3) App + global state
 # -------------------------------------------------------------------
 app = FastAPI(title="Opioid Risk Predictor API", version="1.0.0")
 
