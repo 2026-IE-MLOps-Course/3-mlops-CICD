@@ -12,11 +12,13 @@ Key principle:
 
 from contextlib import asynccontextmanager
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import joblib
 import pandas as pd
+import wandb
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict
@@ -43,14 +45,15 @@ load_dotenv()
 # -------------------------------------------------------------------
 class PatientRecord(BaseModel):
     """
-    This is the API contract. FastAPI + Pydantic will automatically reject 
+    This is the API contract. FastAPI + Pydantic will automatically reject
     requests with missing fields or wrong data types before they reach our ML code.
 
     Why `extra="forbid"`?
-    In standard web development, extra JSON fields are often ignored. 
-    In MLOps, silently accepting extra or misspelled features is dangerous 
+    In standard web development, extra JSON fields are often ignored.
+    In MLOps, silently accepting extra or misspelled features is dangerous
     and leads to silent pipeline failures. We force upstream systems to be exact.
     """
+
     model_config = ConfigDict(
         extra="forbid",
         json_schema_extra={
@@ -126,9 +129,6 @@ class HealthResponse(BaseModel):
 # -------------------------------------------------------------------
 # 2) Small Local Helpers
 # -------------------------------------------------------------------
-# We build these helpers here instead of relying on main.py.
-# This ensures that if a student breaks main.py, the API can still stand up independently.
-
 def _require_list(cfg: Dict[str, Any], key: str) -> List[Any]:
     """Fetch a list from config or fail fast with a clean error."""
     if key not in cfg:
@@ -199,10 +199,51 @@ async def lifespan(app: FastAPI):
         app.state.global_config = load_config(project_root / "config.yaml")
 
         paths_cfg = require_section(app.state.global_config, "paths")
-        model_path = resolve_repo_path(
-            project_root,
-            require_str(paths_cfg, "model_artifact"),
-        )
+
+        # ---------------------------------------------------------
+        # MODEL SOURCE TOGGLE (local vs W&B registry)
+        # ---------------------------------------------------------
+        model_source = os.getenv("MODEL_SOURCE", "local").lower()
+
+        if model_source == "wandb":
+
+            logger.info(
+                "MODEL_SOURCE=wandb → fetching model from W&B Registry")
+
+            wandb_cfg = app.state.global_config.get("wandb", {})
+            wandb_project = wandb_cfg.get("project")
+            artifact_name = wandb_cfg.get("model_artifact_name")
+
+            wandb_entity = os.getenv("WANDB_ENTITY")
+
+            if not wandb_entity or not wandb_project or not artifact_name:
+                raise ValueError(
+                    "WANDB_ENTITY (.env) or wandb.project/model_artifact_name (config.yaml) missing."
+                )
+
+            artifact_path = f"{wandb_entity}/{wandb_project}/{artifact_name}:prod"
+
+            wandb.login(key=os.getenv("WANDB_API_KEY"), relogin=True)
+
+            api = wandb.Api()
+            artifact = api.artifact(artifact_path)
+
+            artifact_dir = artifact.download()
+
+            model_path = Path(artifact_dir) / "model.joblib"
+
+            logger.info("Downloaded model from W&B: %s", artifact_path)
+
+        else:
+
+            logger.info("MODEL_SOURCE=local → using local model artifact")
+
+            model_path = resolve_repo_path(
+                project_root,
+                require_str(paths_cfg, "model_artifact"),
+            )
+
+        # ---------------------------------------------------------
 
         if not model_path.exists():
             logger.error("Model file missing at %s", model_path)
@@ -223,6 +264,7 @@ async def lifespan(app: FastAPI):
 
     logger.info("API shutdown complete")
 
+
 # Create FastAPI app with the above lifespan
 app = FastAPI(
     title="Opioid Risk Predictor API",
@@ -241,7 +283,7 @@ def root() -> Dict[str, str]:
 
 @app.get("/health", response_model=HealthResponse)
 def health_check() -> HealthResponse:
-    # Safely retrieve from app.state
+
     model_loaded = getattr(app.state, "model_pipeline", None) is not None
     model_version = getattr(app.state, "model_version", "unloaded")
 
@@ -258,10 +300,11 @@ def predict(req: PredictRequest) -> PredictResponse:
     Core inference flow demonstrating reuse of batch pipeline logic.
 
     Preventing Training-Serving Skew
-    Notice how we do NOT write new Pandas logic here. We simply pass the 
-    incoming data through the exact same functions (`clean_dataframe`, 
+    Notice how we do NOT write new Pandas logic here. We simply pass the
+    incoming data through the exact same functions (`clean_dataframe`,
     `validate_dataframe`, `run_inference`) that we used during training.
     """
+
     model_pipeline = getattr(app.state, "model_pipeline", None)
     global_config = getattr(app.state, "global_config", {})
     model_version = getattr(app.state, "model_version", "unloaded")
@@ -273,23 +316,18 @@ def predict(req: PredictRequest) -> PredictResponse:
         )
 
     try:
-        # 1. Convert Validated Pydantic objects to a DataFrame
+
         records_dicts = [r.model_dump() for r in req.records]
         df_raw = pd.DataFrame(records_dicts)
 
-        # 2. Clean Data
         df_clean = clean_dataframe(df_raw, target_column=None)
 
-        # 3. Validate Data
         configured_feature_cols = _configured_feature_columns(global_config)
         validation_cfg = require_section(global_config, "validation")
+
         numeric_non_negative_cols = validation_cfg.get(
             "numeric_non_negative_cols", []
         )
-        if not isinstance(numeric_non_negative_cols, list):
-            raise ValueError(
-                "validation.numeric_non_negative_cols must be a list"
-            )
 
         validate_dataframe(
             df=df_clean,
@@ -302,7 +340,6 @@ def predict(req: PredictRequest) -> PredictResponse:
             numeric_non_negative_cols=numeric_non_negative_cols,
         )
 
-        # 4. Handle IDs
         problem_cfg = require_section(global_config, "problem")
         identifier_col = require_str(problem_cfg, "identifier_column")
 
@@ -318,7 +355,6 @@ def predict(req: PredictRequest) -> PredictResponse:
             else df_clean
         )
 
-        # 5. Predict
         run_cfg = require_section(global_config, "run")
         include_proba = bool(
             run_cfg.get("include_proba_if_classification", True)
@@ -336,9 +372,10 @@ def predict(req: PredictRequest) -> PredictResponse:
                 X_infer=X_infer,
             )
 
-        # 6. Format API Response
         preds: List[PredictionItem] = []
+
         for i in range(len(ids)):
+
             pred_val = int(df_pred.iloc[i]["prediction"])
             prob_val: Optional[float] = None
 
@@ -361,8 +398,10 @@ def predict(req: PredictRequest) -> PredictResponse:
     except ValueError as e:
         logger.error("Validation error: %s", str(e))
         raise HTTPException(status_code=422, detail=str(e)) from e
+
     except HTTPException:
         raise
+
     except Exception as e:
         logger.exception("Prediction failed: %s", str(e))
         raise HTTPException(
