@@ -23,4 +23,5 @@ dependencies:
   - uvicorn
   - pydantic
   - httpx
+  - conda-lock
   - pip
