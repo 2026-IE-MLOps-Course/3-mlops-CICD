@@ -210,18 +210,23 @@ async def lifespan(app: FastAPI):
             logger.info(
                 "MODEL_SOURCE=wandb → fetching model from W&B Registry")
 
+            # 1. Pull dynamic settings from .env (Highest priority for deployment)
+            wandb_entity = os.getenv("WANDB_ENTITY")
+            # Default to 'latest' if the alias isn't set in .env
+            artifact_alias = os.getenv("WANDB_MODEL_ALIAS", "latest")
+
+            # 2. Pull project constants from config.yaml
             wandb_cfg = app.state.global_config.get("wandb", {})
             wandb_project = wandb_cfg.get("project")
             artifact_name = wandb_cfg.get("model_artifact_name")
 
-            wandb_entity = os.getenv("WANDB_ENTITY")
-
             if not wandb_entity or not wandb_project or not artifact_name:
                 raise ValueError(
-                    "WANDB_ENTITY (.env) or wandb.project/model_artifact_name (config.yaml) missing."
+                    "Missing required W&B credentials or config settings."
                 )
 
-            artifact_path = f"{wandb_entity}/{wandb_project}/{artifact_name}:prod"
+            # 3. Construct the path WITHOUT hardcoded strings
+            artifact_path = f"{wandb_entity}/{wandb_project}/{artifact_name}:{artifact_alias}"
 
             wandb.login(key=os.getenv("WANDB_API_KEY"), relogin=True)
 
