@@ -335,7 +335,6 @@ def predict(req: PredictRequest, background_tasks: BackgroundTasks) -> PredictRe
         current_time = time.time()
         preds: List[PredictionItem] = []
 
-        # --- THREAD-SAFE OBSERVABILITY INJECTION ---
         with BUFFER_LOCK:
             for i in range(len(ids)):
                 pred_val = int(df_pred.iloc[i]["prediction"])
@@ -366,7 +365,6 @@ def predict(req: PredictRequest, background_tasks: BackgroundTasks) -> PredictRe
                     "project", "opioid-risk-classification")
                 background_tasks.add_task(
                     flush_logs_to_wandb, batch_copy, wandb_project)
-        # -------------------------------------------
 
         return PredictResponse(
             model_version=model_version,
