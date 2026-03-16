@@ -27,7 +27,7 @@ jobs:
               shell: bash -el {0}
               run: |
                   conda install -n base -c conda-forge conda-lock -y
-                  conda-lock install --name mlops conda-lock.yml
+                  python -m conda_lock install --name mlops conda-lock.yml
 
             - name: Run Pytest
               shell: bash -el {0}
