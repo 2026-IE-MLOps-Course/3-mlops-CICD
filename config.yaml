@@ -82,7 +82,7 @@ wandb:
   enabled: true
   project: "opioid-risk-classification"
 
-  name: "03-calibrated-logistic-regression"
+  name: "01-calibrated-logistic-regression"
   job_type: "baseline-calibration"
   group: "session11-baselines"
   tags: ["baseline", "logreg", "calibrated"]
