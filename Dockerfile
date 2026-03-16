@@ -28,10 +28,15 @@ ENV PYTHONPATH=/app
 COPY conda-lock.yml .
 
 # 1. Install conda-lock itself into the container
-# 2. Use conda-lock to install the exact frozen dependencies into the base environment
-# 3. Clean the cache to reduce image size
+# 2. Use conda-lock to install the exact frozen dependencies
+# 3. Install curl explicitly for the Docker HEALTHCHECK
+# 4. Clean caches to reduce image size
 RUN conda install -c conda-forge conda-lock -y && \
     conda-lock install -n mlops conda-lock.yml && \
+    apt-get update && \
+    apt-get install -y curl && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
     conda clean -afy
 
 # We set the PATH to include the mlops environment so that when we run commands like `uvicorn`,
