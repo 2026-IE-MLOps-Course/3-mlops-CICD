@@ -712,7 +712,7 @@ package:
   category: main
   optional: false
 - name: coverage
-  version: 7.13.4
+  version: 7.13.5
   manager: conda
   platform: linux-64
   dependencies:
@@ -721,10 +721,10 @@ package:
     python: '>=3.14,<3.15.0a0'
     python_abi: 3.14.*
     tomli: ''
-  url: https://conda.anaconda.org/conda-forge/linux-64/coverage-7.13.4-py314h67df5f8_0.conda
+  url: https://conda.anaconda.org/conda-forge/linux-64/coverage-7.13.5-py314h67df5f8_0.conda
   hash:
-    md5: 6c7efc167cee337d9c41200506d022b8
-    sha256: b84aa99886610e0c3856ee1b577fe5c2552a5677bb7d281b4a86e79248813898
+    md5: 78f547b78ace7541c4f54c4268ac9d2e
+    sha256: cf5f98a291c3a5489cb299bae38711d5dc21b88a00df981f3b1528781e18c909
   category: main
   optional: false
 - name: cpython
@@ -1388,17 +1388,17 @@ package:
   category: main
   optional: false
 - name: icu
-  version: '78.2'
+  version: '78.3'
   manager: conda
   platform: linux-64
   dependencies:
     __glibc: '>=2.17,<3.0.a0'
     libgcc: '>=14'
     libstdcxx: '>=14'
-  url: https://conda.anaconda.org/conda-forge/linux-64/icu-78.2-h33c6efd_0.conda
+  url: https://conda.anaconda.org/conda-forge/linux-64/icu-78.3-h33c6efd_0.conda
   hash:
-    md5: 186a18e3ba246eccfc7cff00cd19a870
-    sha256: 142a722072fa96cf16ff98eaaf641f54ab84744af81754c292cb81e0881c0329
+    md5: c80d8a3b84358cb967fa81e7075fbc8a
+    sha256: fbf86c4a59c2ed05bbffb2ba25c7ed94f6185ec30ecb691615d42342baa1a16a
   category: main
   optional: false
 - name: idna
@@ -3738,16 +3738,16 @@ package:
   category: main
   optional: false
 - name: pydantic-extra-types
-  version: 2.11.0
+  version: 2.11.1
   manager: conda
   platform: linux-64
   dependencies:
     pydantic: '>=2.5.2'
     python: ''
-  url: https://conda.anaconda.org/conda-forge/noarch/pydantic-extra-types-2.11.0-pyhcf101f3_1.conda
+  url: https://conda.anaconda.org/conda-forge/noarch/pydantic-extra-types-2.11.1-pyhcf101f3_0.conda
   hash:
-    md5: 83984e3edee8f7312c0aa860682ee145
-    sha256: 6a25f3b7a92833534eb9d09e3b4ba00195fbf459ec608d15dc9e31f81b67e972
+    md5: 96513760035d70917819a2840155d23a
+    sha256: 385a900cf5d1d39dafab6088537c58a32d572fd237d7c4598def92c4c1120cb8
   category: main
   optional: false
 - name: pydantic-settings
@@ -3821,10 +3821,10 @@ package:
     python: ''
     python_abi: 3.14.*
     qt6-main: '>=6.10.2,<6.11.0a0'
-  url: https://conda.anaconda.org/conda-forge/linux-64/pyside6-6.10.2-py314h3987850_0.conda
+  url: https://conda.anaconda.org/conda-forge/linux-64/pyside6-6.10.2-py314h3987850_1.conda
   hash:
-    md5: 071ad1489776fd8bdf85d811c37c9b1d
-    sha256: 59e8b21ded24d93a35d7e09650cbc5db52cf495932be911c10aa985adc617aa4
+    md5: 572aaa4811844ba16c265647f06e1106
+    sha256: 1d9b764ed6dec7ac3deb300e553700fbde821d8627776e929e68c2a22274fa98
   category: main
   optional: false
 - name: pysocks
@@ -4465,17 +4465,17 @@ package:
   category: main
   optional: false
 - name: sentry-sdk
-  version: 2.54.0
+  version: 2.55.0
   manager: conda
   platform: linux-64
   dependencies:
     certifi: ''
     python: '>=3.10'
     urllib3: '>=1.25.7'
-  url: https://conda.anaconda.org/conda-forge/noarch/sentry-sdk-2.54.0-pyhd8ed1ab_0.conda
+  url: https://conda.anaconda.org/conda-forge/noarch/sentry-sdk-2.55.0-pyhd8ed1ab_0.conda
   hash:
-    md5: c2cb59203cd085fe11850178e09b9c01
-    sha256: 0ebc591b2b8fafe3b9a49d0048395fd9a300494a5fceb0c24b53c562acfc4609
+    md5: cfb7704771e8db217bb192b7e7392417
+    sha256: 0f9f7a23d1a4aacbc1f40c944e22885cb1b1c51609c15e508974f0274165a9f6
   category: main
   optional: false
 - name: setproctitle
