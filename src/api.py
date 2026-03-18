@@ -158,7 +158,6 @@ async def lifespan(app: FastAPI):
             logger.info(
                 "MODEL_SOURCE=wandb → fetching model from W&B Registry")
             wandb_entity = os.getenv("WANDB_ENTITY")
-            # CRITICAL MLOPS FIX: Default to 'prod' instead of 'latest'
             artifact_alias = os.getenv("WANDB_MODEL_ALIAS", "prod")
 
             wandb_cfg = app.state.global_config.get("wandb", {})
@@ -178,16 +177,32 @@ async def lifespan(app: FastAPI):
             model_path = Path(artifact_dir) / "model.joblib"
             logger.info("Downloaded model from W&B: %s", artifact_path)
 
-            if model_source != "wandb":
-                if not model_path.exists():
-                    logger.error("Model file missing at %s", model_path)
-                    app.state.model_pipeline = None
-                    app.state.model_version = "missing"
-                else:
-                    app.state.model_pipeline = joblib.load(model_path)
-                    app.state.model_version = model_path.name
-                    logger.info(
-                        "Startup complete, model loaded from %s", model_path)
+            if not model_path.exists():
+                logger.error(
+                    "Model file missing inside downloaded artifact at %s", model_path)
+                app.state.model_pipeline = None
+                app.state.model_version = "missing"
+            else:
+                app.state.model_pipeline = joblib.load(model_path)
+                app.state.model_version = artifact_path
+                logger.info(
+                    "Startup complete, model loaded from W&B artifact %s", artifact_path)
+
+        else:
+            logger.info("MODEL_SOURCE=local → using local model artifact")
+            model_path = resolve_repo_path(
+                project_root, require_str(paths_cfg, "model_artifact")
+            )
+
+            if not model_path.exists():
+                logger.error("Model file missing at %s", model_path)
+                app.state.model_pipeline = None
+                app.state.model_version = "missing"
+            else:
+                app.state.model_pipeline = joblib.load(model_path)
+                app.state.model_version = model_path.name
+                logger.info(
+                    "Startup complete, model loaded from %s", model_path)
 
     except Exception as e:
         logger.exception("Startup failed: %s", str(e))
@@ -293,7 +308,7 @@ def predict(req: PredictRequest, background_tasks: BackgroundTasks) -> PredictRe
 
     if model_pipeline is None:
         raise HTTPException(
-            status_code=503, 
+            status_code=503,
             detail="Model is not loaded. Check startup logs, W&B credentials, artifact alias, and model availability.")
 
     try:
