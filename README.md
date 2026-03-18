@@ -1,7 +1,8 @@
 # Opioid Use Disorder (OUD) Risk Prediction Pipeline
 
 ![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)
-![MLOps Standard](https://img.shields.io/badge/MLOps-Modular-success)
+![MLOps Standard](https://img.shields.io/badge/MLOps-CI/CD-success)
+[![CI](https://github.com/2026-IE-MLOps-Course/3-mlops-CICD/actions/workflows/ci.yml/badge.svg)](https://github.com/2026-IE-MLOps-Course/3-mlops-CICD/actions/workflows/ci.yml)
 
 **Author:** MLOps Instructor (Ivan Diaz)  
 **Course:** MLOps: Master in Business Analytics and Data Science  

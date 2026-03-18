@@ -27,12 +27,13 @@ jobs:
               shell: bash -el {0}
               run: |
                   conda install -n base -c conda-forge conda-lock -y
-                  conda-lock install --name mlops-modul conda-lock.yml
+                  conda run -n base conda-lock install --name mlops conda-lock.yml
+
 
             - name: Run Pytest
               shell: bash -el {0}
               run: |
-                  conda activate mlops-modul
+                  conda activate mlops
                   pytest -q
 
             - name: Validate Docker build
