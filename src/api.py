@@ -178,19 +178,16 @@ async def lifespan(app: FastAPI):
             model_path = Path(artifact_dir) / "model.joblib"
             logger.info("Downloaded model from W&B: %s", artifact_path)
 
-        else:
-            logger.info("MODEL_SOURCE=local → using local model artifact")
-            model_path = resolve_repo_path(
-                project_root, require_str(paths_cfg, "model_artifact"))
-
-        if not model_path.exists():
-            logger.error("Model file missing at %s", model_path)
-            app.state.model_pipeline = None
-            app.state.model_version = "missing"
-        else:
-            app.state.model_pipeline = joblib.load(model_path)
-            app.state.model_version = model_path.name
-            logger.info("Startup complete, model loaded from %s", model_path)
+            if model_source != "wandb":
+                if not model_path.exists():
+                    logger.error("Model file missing at %s", model_path)
+                    app.state.model_pipeline = None
+                    app.state.model_version = "missing"
+                else:
+                    app.state.model_pipeline = joblib.load(model_path)
+                    app.state.model_version = model_path.name
+                    logger.info(
+                        "Startup complete, model loaded from %s", model_path)
 
     except Exception as e:
         logger.exception("Startup failed: %s", str(e))
@@ -270,9 +267,20 @@ def root() -> Dict[str, str]:
 def health_check() -> HealthResponse:
     model_loaded = getattr(app.state, "model_pipeline", None) is not None
     model_version = getattr(app.state, "model_version", "unloaded")
+
+    if not model_loaded:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "model_not_loaded",
+                "model_loaded": False,
+                "model_version": model_version,
+            },
+        )
+
     return HealthResponse(
-        status="ok" if model_loaded else "model_not_loaded",
-        model_loaded=model_loaded,
+        status="ok",
+        model_loaded=True,
         model_version=model_version,
     )
 
@@ -285,7 +293,8 @@ def predict(req: PredictRequest, background_tasks: BackgroundTasks) -> PredictRe
 
     if model_pipeline is None:
         raise HTTPException(
-            status_code=503, detail="Model is not loaded, run `python -m src.main` first")
+            status_code=503, 
+            detail="Model is not loaded. Check startup logs, W&B credentials, artifact alias, and model availability.")
 
     try:
         # Start timing the inference specifically for our ML Logs
