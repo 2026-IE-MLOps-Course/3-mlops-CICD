@@ -1,3 +1,10 @@
+[![CI](https://github.com/2026-IE-MLOps-Course/3-mlops-CICD/actions/workflows/ci.yml/badge.svg)](https://github.com/2026-IE-MLOps-Course/3-mlops-CICD/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/Python-3.9%2B-blue)
+![MLOps](https://img.shields.io/badge/MLOps-CI%2FCD-success)
+![Docker](https://img.shields.io/badge/Docker-enabled-blue)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/2026-IE-MLOps-Course/3-mlops-CICD/blob/main/LICENSE)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/2026-IE-MLOps-Course/3-mlops-CICD)
+
 # Opioid Risk Prediction MLOps Project
 
 Author: Ivan Diaz  
