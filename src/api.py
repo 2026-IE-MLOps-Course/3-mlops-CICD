@@ -242,32 +242,48 @@ BATCH_SIZE = 10
 
 def flush_logs_to_wandb(batch_data: list, project_name: str):
     """Ephemeral W&B run to securely log the batch as a Table."""
-    # CRITICAL MLOPS FIX: Do not attempt to hit W&B if disabled (e.g., during CI tests)
     if os.getenv("WANDB_MODE", "").lower() == "disabled":
         logger.info("Skipping W&B flush because WANDB_MODE=disabled")
         return
 
     try:
-        run = wandb.init(project=project_name,
-                         job_type="inference-batch", reinit=True)
-        feature_keys = list(batch_data[0]['features'].keys())
-        # Added 'latency' to correlate model speed with data payloads
-        columns = ["req_id", "timestamp", "model_version",
-                   "latency", "prediction", "probability"] + feature_keys
+        wandb_entity = os.getenv("WANDB_ENTITY")
+        run = wandb.init(
+            entity=wandb_entity if wandb_entity else None,
+            project=project_name,
+            job_type="inference-batch",
+            reinit=True,
+        )
+
+        feature_keys = list(batch_data[0]["features"].keys())
+        columns = [
+            "req_id",
+            "timestamp",
+            "model_version",
+            "latency",
+            "prediction",
+            "probability",
+        ] + feature_keys
 
         table = wandb.Table(columns=columns)
+
         for item in batch_data:
             row = [
-                item['req_id'], item['timestamp'], item['model_version'], item['latency'],
-                item['prediction'], item['probability']
-            ] + [item['features'].get(k) for k in feature_keys]
+                item["req_id"],
+                item["timestamp"],
+                item["model_version"],
+                item["latency"],
+                item["prediction"],
+                item["probability"],
+            ] + [item["features"].get(k) for k in feature_keys]
             table.add_data(*row)
 
         run.log({"inference_logs": table})
         run.finish()
-        logger.info(f"Flushed {len(batch_data)} ML logs to W&B.")
+        logger.info("Flushed %s ML logs to W&B", len(batch_data))
+
     except Exception as e:
-        logger.error(f"Failed to flush logs to W&B: {e}")
+        logger.error("Failed to flush logs to W&B: %s", e)
 
 
 # -------------------------------------------------------------------
