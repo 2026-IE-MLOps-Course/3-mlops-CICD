@@ -156,7 +156,8 @@ async def lifespan(app: FastAPI):
 
         if model_source == "wandb":
             logger.info(
-                "MODEL_SOURCE=wandb → fetching model from W&B Registry")
+                "MODEL_SOURCE=wandb -> fetching model from W&B Registry")
+
             wandb_entity = os.getenv("WANDB_ENTITY")
             artifact_alias = os.getenv("WANDB_MODEL_ALIAS", "prod")
 
@@ -166,15 +167,16 @@ async def lifespan(app: FastAPI):
 
             if not wandb_entity or not wandb_project or not artifact_name:
                 raise ValueError(
-                    "Missing required W&B credentials or config settings.")
+                    "Missing required W&B credentials or config settings")
 
             artifact_path = f"{wandb_entity}/{wandb_project}/{artifact_name}:{artifact_alias}"
-            wandb.login(key=os.getenv("WANDB_API_KEY"), relogin=True)
 
+            wandb.login(key=os.getenv("WANDB_API_KEY"), relogin=True)
             api = wandb.Api()
             artifact = api.artifact(artifact_path)
             artifact_dir = artifact.download()
             model_path = Path(artifact_dir) / "model.joblib"
+
             logger.info("Downloaded model from W&B: %s", artifact_path)
 
             if not model_path.exists():
@@ -189,9 +191,11 @@ async def lifespan(app: FastAPI):
                     "Startup complete, model loaded from W&B artifact %s", artifact_path)
 
         else:
-            logger.info("MODEL_SOURCE=local → using local model artifact")
+            logger.info("MODEL_SOURCE=local -> using local model artifact")
+
             model_path = resolve_repo_path(
-                project_root, require_str(paths_cfg, "model_artifact")
+                project_root,
+                require_str(paths_cfg, "model_artifact"),
             )
 
             if not model_path.exists():
