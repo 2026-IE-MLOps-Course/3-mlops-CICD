@@ -156,9 +156,9 @@ async def lifespan(app: FastAPI):
 
         if model_source == "wandb":
             logger.info(
-                "MODEL_SOURCE=wandb → fetching model from W&B Registry")
+                "MODEL_SOURCE=wandb -> fetching model from W&B Registry")
+
             wandb_entity = os.getenv("WANDB_ENTITY")
-            # CRITICAL MLOPS FIX: Default to 'prod' instead of 'latest'
             artifact_alias = os.getenv("WANDB_MODEL_ALIAS", "prod")
 
             wandb_cfg = app.state.global_config.get("wandb", {})
@@ -167,27 +167,46 @@ async def lifespan(app: FastAPI):
 
             if not wandb_entity or not wandb_project or not artifact_name:
                 raise ValueError(
-                    "Missing required W&B credentials or config settings.")
+                    "Missing required W&B credentials or config settings")
 
             artifact_path = f"{wandb_entity}/{wandb_project}/{artifact_name}:{artifact_alias}"
-            wandb.login(key=os.getenv("WANDB_API_KEY"), relogin=True)
 
+            wandb.login(key=os.getenv("WANDB_API_KEY"), relogin=True)
             api = wandb.Api()
             artifact = api.artifact(artifact_path)
             artifact_dir = artifact.download()
             model_path = Path(artifact_dir) / "model.joblib"
+
             logger.info("Downloaded model from W&B: %s", artifact_path)
 
-            if model_source != "wandb":
-                if not model_path.exists():
-                    logger.error("Model file missing at %s", model_path)
-                    app.state.model_pipeline = None
-                    app.state.model_version = "missing"
-                else:
-                    app.state.model_pipeline = joblib.load(model_path)
-                    app.state.model_version = model_path.name
-                    logger.info(
-                        "Startup complete, model loaded from %s", model_path)
+            if not model_path.exists():
+                logger.error(
+                    "Model file missing inside downloaded artifact at %s", model_path)
+                app.state.model_pipeline = None
+                app.state.model_version = "missing"
+            else:
+                app.state.model_pipeline = joblib.load(model_path)
+                app.state.model_version = artifact_path
+                logger.info(
+                    "Startup complete, model loaded from W&B artifact %s", artifact_path)
+
+        else:
+            logger.info("MODEL_SOURCE=local -> using local model artifact")
+
+            model_path = resolve_repo_path(
+                project_root,
+                require_str(paths_cfg, "model_artifact"),
+            )
+
+            if not model_path.exists():
+                logger.error("Model file missing at %s", model_path)
+                app.state.model_pipeline = None
+                app.state.model_version = "missing"
+            else:
+                app.state.model_pipeline = joblib.load(model_path)
+                app.state.model_version = model_path.name
+                logger.info(
+                    "Startup complete, model loaded from %s", model_path)
 
     except Exception as e:
         logger.exception("Startup failed: %s", str(e))
@@ -227,32 +246,48 @@ BATCH_SIZE = 10
 
 def flush_logs_to_wandb(batch_data: list, project_name: str):
     """Ephemeral W&B run to securely log the batch as a Table."""
-    # CRITICAL MLOPS FIX: Do not attempt to hit W&B if disabled (e.g., during CI tests)
     if os.getenv("WANDB_MODE", "").lower() == "disabled":
         logger.info("Skipping W&B flush because WANDB_MODE=disabled")
         return
 
     try:
-        run = wandb.init(project=project_name,
-                         job_type="inference-batch", reinit=True)
-        feature_keys = list(batch_data[0]['features'].keys())
-        # Added 'latency' to correlate model speed with data payloads
-        columns = ["req_id", "timestamp", "model_version",
-                   "latency", "prediction", "probability"] + feature_keys
+        wandb_entity = os.getenv("WANDB_ENTITY")
+        run = wandb.init(
+            entity=wandb_entity if wandb_entity else None,
+            project=project_name,
+            job_type="inference-batch",
+            reinit=True,
+        )
+
+        feature_keys = list(batch_data[0]["features"].keys())
+        columns = [
+            "req_id",
+            "timestamp",
+            "model_version",
+            "latency",
+            "prediction",
+            "probability",
+        ] + feature_keys
 
         table = wandb.Table(columns=columns)
+
         for item in batch_data:
             row = [
-                item['req_id'], item['timestamp'], item['model_version'], item['latency'],
-                item['prediction'], item['probability']
-            ] + [item['features'].get(k) for k in feature_keys]
+                item["req_id"],
+                item["timestamp"],
+                item["model_version"],
+                item["latency"],
+                item["prediction"],
+                item["probability"],
+            ] + [item["features"].get(k) for k in feature_keys]
             table.add_data(*row)
 
         run.log({"inference_logs": table})
         run.finish()
-        logger.info(f"Flushed {len(batch_data)} ML logs to W&B.")
+        logger.info("Flushed %s ML logs to W&B", len(batch_data))
+
     except Exception as e:
-        logger.error(f"Failed to flush logs to W&B: {e}")
+        logger.error("Failed to flush logs to W&B: %s", e)
 
 
 # -------------------------------------------------------------------
@@ -293,7 +328,7 @@ def predict(req: PredictRequest, background_tasks: BackgroundTasks) -> PredictRe
 
     if model_pipeline is None:
         raise HTTPException(
-            status_code=503, 
+            status_code=503,
             detail="Model is not loaded. Check startup logs, W&B credentials, artifact alias, and model availability.")
 
     try:
