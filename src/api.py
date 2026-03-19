@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 import logging
 import os
 import time
+import uuid
 from threading import Lock
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -230,10 +231,26 @@ app = FastAPI(title="Opioid Risk Predictor API",
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start_time = time.time()
+
+    correlation_id = str(uuid.uuid4())
+    request.state.correlation_id = correlation_id
+
     response = await call_next(request)
+
     latency = time.time() - start_time
+    model_version = getattr(app.state, "model_version", "unloaded")
+
     logger.info(
-        f"Path: {request.url.path} | Method: {request.method} | Status: {response.status_code} | Latency: {latency:.4f}s")
+        "correlation_id=%s path=%s method=%s status=%s latency_s=%.4f model_version=%s",
+        correlation_id,
+        request.url.path,
+        request.method,
+        response.status_code,
+        latency,
+        model_version,
+    )
+
+    response.headers["X-Correlation-ID"] = correlation_id
     return response
 
 
@@ -241,11 +258,14 @@ async def log_requests(request: Request, call_next):
 LOG_BUFFER = []
 # Protects our buffer from race conditions during concurrent API requests
 BUFFER_LOCK = Lock()
-BATCH_SIZE = 10
+BATCH_SIZE = 1
 
 
 def flush_logs_to_wandb(batch_data: list, project_name: str):
-    """Ephemeral W&B run to securely log the batch as a Table."""
+    """Ephemeral W&B run to securely log a batch of inference rows as a Table."""
+    if not batch_data:
+        return
+
     if os.getenv("WANDB_MODE", "").lower() == "disabled":
         logger.info("Skipping W&B flush because WANDB_MODE=disabled")
         return
@@ -261,10 +281,13 @@ def flush_logs_to_wandb(batch_data: list, project_name: str):
 
         feature_keys = list(batch_data[0]["features"].keys())
         columns = [
+            "correlation_id",
             "req_id",
             "timestamp",
+            "path",
+            "status_code",
             "model_version",
-            "latency",
+            "latency_s",
             "prediction",
             "probability",
         ] + feature_keys
@@ -273,13 +296,17 @@ def flush_logs_to_wandb(batch_data: list, project_name: str):
 
         for item in batch_data:
             row = [
+                item["correlation_id"],
                 item["req_id"],
                 item["timestamp"],
+                item["path"],
+                item["status_code"],
                 item["model_version"],
-                item["latency"],
+                item["latency_s"],
                 item["prediction"],
                 item["probability"],
             ] + [item["features"].get(k) for k in feature_keys]
+
             table.add_data(*row)
 
         run.log({"inference_logs": table})
@@ -321,7 +348,11 @@ def health_check() -> HealthResponse:
 
 
 @app.post("/predict", response_model=PredictResponse)
-def predict(req: PredictRequest, background_tasks: BackgroundTasks) -> PredictResponse:
+def predict(
+    req: PredictRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> PredictResponse:
     model_pipeline = getattr(app.state, "model_pipeline", None)
     global_config = getattr(app.state, "global_config", {})
     model_version = getattr(app.state, "model_version", "unloaded")
@@ -334,7 +365,8 @@ def predict(req: PredictRequest, background_tasks: BackgroundTasks) -> PredictRe
     try:
         # Start timing the inference specifically for our ML Logs
         inference_start_time = time.time()
-
+        correlation_id = getattr(
+            request.state, "correlation_id", "missing_correlation_id")
         records_dicts = [r.model_dump() for r in req.records]
         df_raw = pd.DataFrame(records_dicts)
         df_clean = clean_dataframe(df_raw, target_column=None)
@@ -393,13 +425,16 @@ def predict(req: PredictRequest, background_tasks: BackgroundTasks) -> PredictRe
                 )
 
                 LOG_BUFFER.append({
+                    "correlation_id": correlation_id,
                     "req_id": ids[i],
                     "timestamp": current_time,
+                    "path": "/predict",
+                    "status_code": 200,
                     "model_version": model_version,
-                    "latency": inference_latency,
+                    "latency_s": inference_latency,
                     "prediction": pred_val,
                     "probability": prob_val,
-                    "features": records_dicts[i]
+                    "features": records_dicts[i],
                 })
 
             if len(LOG_BUFFER) >= BATCH_SIZE:
