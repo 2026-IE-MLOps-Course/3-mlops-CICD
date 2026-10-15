@@ -1,0 +1,66 @@
+# deploy.yml: Continuous Deployment (CD), ship a release to Render
+# A PERSON decides when to release (publish a GitHub Release). Automation decides how:
+#   1. rerun the full CI on the released commit
+#   2. ask Render to deploy exactly that commit (deploy hook + ?ref=<sha>)
+#   3. smoke test: wait until /health reports the new commit, then call /predict
+# Rollback: Actions > "CD - Deploy to Render" > Run workflow > type an older tag
+#
+# One-time setup (see README section 9)
+#   Secret   RENDER_DEPLOY_HOOK_URL  (Render > Settings > Deploy Hook, treat it like a password)
+#   Variable RENDER_SERVICE_URL      (e.g. https://<your-service>.onrender.com)
+
+name: CD - Deploy to Render
+
+on:
+    release:
+        types: [published]
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: "Release tag to deploy (an older tag rolls back)"
+                required: true
+
+# Never run two deploys at the same time
+concurrency:
+    group: deploy-production
+    cancel-in-progress: false
+
+jobs:
+    ci:
+        uses: ./.github/workflows/ci.yml
+        with:
+            ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+    deploy:
+        needs: ci
+        runs-on: ubuntu-latest
+        timeout-minutes: 30
+        steps:
+            - name: Checkout the release
+              uses: actions/checkout@v4
+              with:
+                  ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+            - name: Find the commit to deploy
+              id: commit
+              run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+            - name: Trigger the Render deploy for this exact commit
+              env:
+                  HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+              run: |
+                  if [ -z "$HOOK" ]; then echo "Missing secret RENDER_DEPLOY_HOOK_URL"; exit 1; fi
+                  curl --fail --silent --show-error -X POST "${HOOK}&ref=${{ steps.commit.outputs.sha }}"
+
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.12"
+
+            # Free Render services sleep and builds take minutes, hence the long timeout
+            - name: Smoke test the live API
+              run: >
+                  python scripts/smoke_test.py
+                  --url "${{ vars.RENDER_SERVICE_URL }}"
+                  --expect-commit "${{ steps.commit.outputs.sha }}"
+                  --timeout 1200
