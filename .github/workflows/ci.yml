@@ -1,40 +1,81 @@
-name: MLOps Quality Gate
+# ci.yml: Continuous Integration (CI), the automatic quality gate
+# Runs on every Pull Request to dev or main, on every push to main,
+# and is reused by deploy.yml to recheck the exact commit being released
+# Branch protection: require the "lint" and "test-and-build" checks on dev and main
+
+name: CI - Quality Gate
 
 on:
     pull_request:
-        branches: ["main"]
+        branches: ["dev", "main"]
     push:
         branches: ["main"]
     workflow_dispatch:
+    workflow_call:
+        inputs:
+            ref:
+                description: "Git ref to check (deploy.yml passes the release tag)"
+                type: string
+                required: false
+                default: ""
 
 jobs:
-    ci-test-build:
+    # 1. Fast style check: fails in seconds, before the slow steps start
+    lint:
         runs-on: ubuntu-latest
-        timeout-minutes: 25
-        env:
-            WANDB_MODE: disabled
-            MODEL_SOURCE: local # CI validates code and packaging, NOT W&B uptime
+        timeout-minutes: 5
         steps:
             - name: Checkout repository
               uses: actions/checkout@v4
+              with:
+                  ref: ${{ inputs.ref }}
+
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.12"
+
+            - name: Run flake8 (same rules as the VS Code PROBLEMS tab, see .flake8)
+              run: |
+                  pip install flake8
+                  flake8
+
+    # 2. Rebuild the exact environment, run the pipeline, the tests and the Docker build
+    test-and-build:
+        needs: lint
+        runs-on: ubuntu-latest
+        timeout-minutes: 25
+        env:
+            WANDB_MODE: disabled # CI checks our code, not W&B uptime: no account, no secrets
+            MODEL_SOURCE: local
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+              with:
+                  ref: ${{ inputs.ref }}
 
             - name: Setup Miniconda
               uses: conda-incubator/setup-miniconda@v3
               with:
                   auto-activate-base: true
 
-            - name: Install conda-lock and create exact environment
+            - name: Install the exact environment from conda-lock.yml
               shell: bash -el {0}
               run: |
                   conda install -n base -c conda-forge conda-lock -y
-                  conda run -n base conda-lock install --name mlops conda-lock.yml
+                  conda-lock install --name mlops conda-lock.yml
 
-
-            - name: Run Pytest
+            - name: Run the full pipeline (the model quality gate runs here)
               shell: bash -el {0}
               run: |
                   conda activate mlops
-                  pytest -q
+                  python -m src.main
 
-            - name: Validate Docker build
-              run: docker build -t mlops-api:test .
+            - name: Run tests with coverage (minimum 75%)
+              shell: bash -el {0}
+              run: |
+                  conda activate mlops
+                  pytest --cov=src --cov-report=term-missing --cov-fail-under=75
+
+            - name: Docker image must build
+              run: docker build -t mlops-api:ci .
