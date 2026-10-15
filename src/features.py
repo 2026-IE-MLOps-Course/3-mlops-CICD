@@ -1,12 +1,15 @@
 # src/features.py
 """
 Educational Goal:
-- Why this module exists in an MLOps system: Define feature engineering rules as a reusable recipe that can be fitted safely on training data only
-- Responsibility (separation of concerns): Build and return a ColumnTransformer recipe. No file I/O, no .fit() calls here
+- Why this module exists in an MLOps system: Define feature engineering rules as a reusable recipe that can be
+  fitted safely on training data only
+- Responsibility (separation of concerns): Build and return a ColumnTransformer recipe. No file I/O, no .fit()
+  calls here
 - Pipeline contract (inputs and outputs): Inputs are configuration lists. Output is an unfitted ColumnTransformer
 
 """
 
+import logging
 from typing import List, Optional
 
 import numpy as np
@@ -14,6 +17,8 @@ from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, KBinsDiscretizer, OneHotEncoder, StandardScaler
+
+logger = logging.getLogger(__name__)
 
 
 def _row_sum_numpy(X) -> np.ndarray:
@@ -64,7 +69,7 @@ def get_feature_preprocessor(
     Why this contract matters for reliable ML delivery
     - This function defines the recipe only, fitting happens later on X_train only
     """
-    print("[features.get_feature_preprocessor] Building feature recipe from configuration")  # TODO
+    logger.info("Building feature recipe from configuration")
 
     if n_bins < 2:
         raise ValueError("Fatal: n_bins must be >= 2 for quantile binning")
@@ -138,7 +143,8 @@ def get_feature_preprocessor(
         transformers.append(("num_scaled", num_pipe, numeric_passthrough_cols))
 
     # remainder="drop" is a strict gatekeeper
-    # Only configured columns enter the model, unexpected columns are ignored rather than silently changing the feature space
+    # Only configured columns enter the model, unexpected columns are ignored rather than silently changing
+    # the feature space
     preprocessor = ColumnTransformer(
         transformers=transformers,
         remainder="drop",

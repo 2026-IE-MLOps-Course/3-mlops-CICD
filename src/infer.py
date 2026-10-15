@@ -3,7 +3,8 @@
 Educational Goal:
 - Why this module exists in an MLOps system: Separate inference so it can be reused for batch or real-time prediction.
 - Responsibility (separation of concerns): Only runs model.predict and formats outputs. No training or metrics.
-- Pipeline contract: Inputs are a fitted model and a feature DataFrame. Output is a strictly formatted predictions DataFrame.
+- Pipeline contract: Inputs are a fitted model and a feature DataFrame. Output is a strictly formatted
+  predictions DataFrame.
 
 
 """

@@ -3,7 +3,8 @@
 # Packages the FastAPI inference service, NOT training code.
 # --------------------------------------------------------
 
-FROM continuumio/miniconda3:latest
+# Pin an exact base image tag: "latest" can change under you and break a build that worked yesterday
+FROM continuumio/miniconda3:26.5.3-1
 
 # Set the working directory
 WORKDIR /app
@@ -43,8 +44,7 @@ RUN conda install -c conda-forge conda-lock -y && \
 # it uses the correct Python environment with all dependencies installed
 ENV PATH=/opt/conda/envs/mlops/bin:$PATH
 
-# Copy the rest of the application code
-# .dockerignore used to exclude unnecessary files (e.g., .git, __pycache__, etc.)
+# Copy only what .dockerignore allows: config.yaml, src/ and (optionally) models/
 COPY . .
 
 # Expose a default port (mostly for local documentation)

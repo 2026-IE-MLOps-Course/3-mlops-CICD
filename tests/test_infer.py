@@ -2,10 +2,10 @@
 """
 Educational Goal:
 - Why this test exists in an MLOps system: Ensure the inference module strictly honors the pipeline contract.
-- Responsibility: Verify that predictions are formatted correctly (preserving indexes), probabilities are mathematically sound, and bad inputs crash early.
+- Responsibility: Verify that predictions are formatted correctly (preserving indexes), probabilities are
+  mathematically sound, and bad inputs crash early.
 """
 
-import numpy as np
 import pandas as pd
 import pytest
 from sklearn.dummy import DummyClassifier, DummyRegressor
@@ -92,7 +92,7 @@ def test_raises_if_proba_requested_but_unsupported(dummy_regressor, dummy_infere
     """Crash if a user asks for probabilities from a model that cannot provide them."""
     X, _ = dummy_inference_data
 
-    with pytest.raises(TypeError, match="Fatal: include_proba=True but the loaded model does not support predict_proba"):
+    with pytest.raises(TypeError, match="does not support predict_proba"):
         run_inference(model=dummy_regressor, X_infer=X, include_proba=True)
 
 

@@ -6,13 +6,18 @@ Educational Goal:
 """
 
 from pathlib import Path
+
 import pandas as pd
 import pytest
+
+from src.config import load_config
 from src.load_data import load_raw_data
 
-# Constants to prevent copy-paste drift
-REAL_DATA_PATH = Path("data/raw/opiod_raw_data.csv")
-TARGET_COLUMN = "OD"
+# Read the real paths from config.yaml so a renamed file cannot silently skip this test
+REPO_ROOT = Path(__file__).resolve().parents[1]
+_CFG = load_config(REPO_ROOT / "config.yaml")
+REAL_DATA_PATH = REPO_ROOT / _CFG["paths"]["raw_data"]
+TARGET_COLUMN = _CFG["problem"]["target_column"]
 
 
 def test_load_raw_data_real_dataset_integration():

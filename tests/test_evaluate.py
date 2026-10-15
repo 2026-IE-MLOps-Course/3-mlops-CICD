@@ -10,7 +10,7 @@ import pytest
 from sklearn.dummy import DummyRegressor
 from sklearn.linear_model import LogisticRegression
 
-from src.evaluate import evaluate_calibration, evaluate_model
+from src.evaluate import check_quality_gate, evaluate_calibration, evaluate_model
 
 
 @pytest.fixture
@@ -189,3 +189,27 @@ def test_evaluate_calibration_raises_on_invalid_probability_range():
             y_prob=y_prob,
             n_bins=2,
         )
+
+
+# --------------------------------------------------------
+# Model quality gate
+# --------------------------------------------------------
+
+def test_quality_gate_passes_when_metric_above_minimum():
+    check_quality_gate({"pr_auc": 0.6}, metric="pr_auc", min_value=0.4)
+
+
+def test_quality_gate_fails_when_metric_below_minimum():
+    with pytest.raises(ValueError, match="Quality gate FAILED"):
+        check_quality_gate({"pr_auc": 0.2}, metric="pr_auc", min_value=0.4)
+
+
+def test_quality_gate_supports_lower_is_better_metrics():
+    check_quality_gate({"rmse": 1.0}, metric="rmse", max_value=2.0)
+    with pytest.raises(ValueError, match="above the maximum"):
+        check_quality_gate({"rmse": 3.0}, metric="rmse", max_value=2.0)
+
+
+def test_quality_gate_unknown_metric_raises():
+    with pytest.raises(ValueError, match="not found"):
+        check_quality_gate({"pr_auc": 0.6}, metric="f1", min_value=0.4)

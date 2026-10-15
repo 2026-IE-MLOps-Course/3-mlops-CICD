@@ -189,6 +189,8 @@ def _make_test_config(tmp_path: Path, binary_sum_cols: List[str]) -> Dict[str, A
         },
         "evaluation": {
             "calibration_bins": 5,
+            "evaluate_on_test": False,
+            "quality_gate": {"enabled": False},
         },
         "run": {
             "include_proba_if_classification": True,
@@ -336,3 +338,50 @@ def test_main_raises_when_raw_data_missing(tmp_path, monkeypatch):
 
     with pytest.raises(FileNotFoundError):
         main_module.main()
+
+
+def _write_inputs(cfg: Dict[str, Any], binary_sum_cols: List[str]) -> None:
+    raw_path = Path(cfg["paths"]["raw_data"])
+    inference_path = Path(cfg["paths"]["inference_data"])
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    inference_path.parent.mkdir(parents=True, exist_ok=True)
+    _make_synthetic_raw_df(binary_sum_cols=binary_sum_cols, n_rows=200).to_csv(raw_path, index=False)
+    _make_synthetic_inference_df(binary_sum_cols=binary_sum_cols, n_rows=10).to_csv(inference_path, index=False)
+
+
+def test_quality_gate_failure_stops_pipeline_before_saving_model(tmp_path, monkeypatch):
+    """
+    The most important CD rule: a model that misses the agreed threshold is never saved,
+    so it can never be registered in W&B or deployed
+    """
+    binary_sum_cols = _binary_sum_cols_for_tests()
+    cfg = _make_test_config(tmp_path, binary_sum_cols)
+    cfg["evaluation"]["quality_gate"] = {"enabled": True, "metric": "roc_auc", "min_value": 1.01}
+    _patch_config_loader(monkeypatch, cfg)
+    _write_inputs(cfg, binary_sum_cols)
+
+    with pytest.raises(ValueError, match="Quality gate FAILED"):
+        main_module.main()
+
+    assert not Path(cfg["paths"]["model_artifact"]).exists()
+
+
+def test_test_split_is_evaluated_once_when_audit_enabled(tmp_path, monkeypatch):
+    """With evaluate_on_test: true we expect 2 validation evaluations + 1 test audit."""
+    binary_sum_cols = _binary_sum_cols_for_tests()
+    cfg = _make_test_config(tmp_path, binary_sum_cols)
+    cfg["evaluation"]["evaluate_on_test"] = True
+    _patch_config_loader(monkeypatch, cfg)
+    _write_inputs(cfg, binary_sum_cols)
+
+    calls = {"n": 0}
+    original_evaluate = main_module.evaluate_model
+
+    def _spy(*args, **kwargs):
+        calls["n"] += 1
+        return original_evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(main_module, "evaluate_model", _spy)
+    main_module.main()
+
+    assert calls["n"] == 3

@@ -1,0 +1,6 @@
+# .flake8
+# Style checker settings (PEP 8). Run from the repo root: flake8
+# VS Code reads the same file, so the PROBLEMS tab and CI agree
+[flake8]
+max-line-length = 120
+exclude = .git,__pycache__,notebooks,data,models,reports,logs,wandb,artifacts

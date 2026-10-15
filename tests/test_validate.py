@@ -4,7 +4,8 @@
 Educational Goal:
 - Why this test exists in an MLOps system: Ensure our "security gate" triggers correctly when bad data arrives.
 - Responsibility (separation of concerns): Test validation logic independently of cleaning, features, or training.
-- Pipeline contract: validate_dataframe raises ValueError on empty data, missing columns, or constraint violations, and returns True for clean data.
+- Pipeline contract: validate_dataframe raises ValueError on empty data, missing columns, or constraint
+  violations, and returns True for clean data.
 """
 
 import pandas as pd

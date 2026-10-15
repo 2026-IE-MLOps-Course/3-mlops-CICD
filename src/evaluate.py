@@ -47,7 +47,8 @@ def evaluate_calibration(
 
     Why this contract matters for reliable ML delivery
     - Ranking metrics such as ROC AUC do not tell us whether a predicted 0.80 means an actual 80% event likelihood
-    - Calibration metrics matter when teams use probabilities for prioritization, threshold setting, and risk communication
+    - Calibration metrics matter when teams use probabilities for prioritization, threshold setting, and risk
+      communication
     """
     if isinstance(y_true, pd.Series):
         y_true = y_true.values
@@ -187,3 +188,47 @@ def evaluate_model(
     raise ValueError(
         f"Fatal: Unsupported problem_type '{problem_type}'. Use 'classification' or 'regression'"
     )
+
+
+def check_quality_gate(
+    metrics: Dict[str, float],
+    *,
+    metric: str,
+    min_value: Optional[float] = None,
+    max_value: Optional[float] = None,
+) -> None:
+    """
+    Inputs
+    - metrics: Output of evaluate_model (validation split)
+    - metric: Metric name to check, e.g. "pr_auc" (classification) or "rmse" (regression)
+    - min_value: Lowest acceptable value (use for "higher is better" metrics)
+    - max_value: Highest acceptable value (use for "lower is better" metrics such as rmse)
+
+    Outputs
+    - None. Raises ValueError when the model is not good enough to ship
+
+    Why this contract matters for reliable ML delivery
+    - A pipeline that "runs" is not the same as a model that is fit for purpose
+    - The gate stops a weak model before it is saved, registered in W&B, or deployed
+    - Thresholds live in config.yaml, so the business owner can agree them without reading code
+    """
+    if metric not in metrics:
+        raise ValueError(
+            f"Quality gate: metric '{metric}' not found. Available metrics: {sorted(metrics)}"
+        )
+
+    value = float(metrics[metric])
+
+    if min_value is not None and value < float(min_value):
+        raise ValueError(
+            f"Quality gate FAILED: {metric}={value:.4f} is below the minimum {float(min_value):.4f}. "
+            "The model was not saved. Improve features or settings in config.yaml and rerun"
+        )
+
+    if max_value is not None and value > float(max_value):
+        raise ValueError(
+            f"Quality gate FAILED: {metric}={value:.4f} is above the maximum {float(max_value):.4f}. "
+            "The model was not saved. Improve features or settings in config.yaml and rerun"
+        )
+
+    logger.info("Quality gate PASSED | %s=%.4f", metric, value)
