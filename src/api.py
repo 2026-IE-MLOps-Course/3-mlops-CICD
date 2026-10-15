@@ -1,56 +1,58 @@
 # src/api.py
 """
 Educational Goal:
-- Turn the trained ML pipeline into a minimal web product using FastAPI.
-- Use Pydantic to enforce a strict data contract (types and required fields).
-- Reuse existing pipeline modules to prove modularity value and prevent "Training-Serving Skew".
-- (Phase 4 Additions) Implement Scalable Observability: System Logs (Layer 1) and Async Batched ML Logs (Layer 2).
+- Turn the trained ML pipeline into a minimal web product using FastAPI
+- Use Pydantic to enforce a strict data contract (types and required fields)
+- Reuse existing pipeline modules to prevent training-serving skew
+- Add lightweight observability: request logs (Layer 1) and batched prediction logs to W&B (Layer 2)
 
-Key principle:
-- NO NEW ML LOGIC IN THIS FILE.
-- This file only does HTTP, schema validation, startup loading, observability logging, and routing.
+Key principle
+- NO NEW ML LOGIC IN THIS FILE
+- This file only does HTTP, schema validation, startup loading, observability and routing
+
+Run it locally
+- uvicorn src.api:app --reload
+- Open http://127.0.0.1:8000/docs
 """
 
-from contextlib import asynccontextmanager
 import logging
 import os
 import time
 import uuid
-from threading import Lock
+from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import Lock
 from typing import Any, Dict, List, Optional
 
 import joblib
 import pandas as pd
 import wandb
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
 from src.clean_data import clean_dataframe
+from src.config import get_feature_columns, load_config, require_section, require_str, resolve_repo_path
 from src.infer import run_inference
+from src.logger import configure_logging
 from src.validate import validate_dataframe
 
-# Keep this as the only coupling to main.py to keep the API decoupled
-from src.main import load_config, require_section, require_str, resolve_repo_path
-
 logger = logging.getLogger(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
 
-# Load environment variables from .env (e.g. for config paths or secrets)
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+# Secrets and deployment switches come from environment variables (.env locally, Render settings in the cloud)
+load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
 
 
 # -------------------------------------------------------------------
-# 1) Pydantic Schemas (The "Bouncer" / Strict API Contract)
+# 1) Pydantic schemas (the strict API contract)
 # -------------------------------------------------------------------
 class PatientRecord(BaseModel):
     """
-    This is the API contract. FastAPI + Pydantic will automatically reject
-    requests with missing fields or wrong data types before they reach our ML code.
+    The API contract for one patient
+    - Missing fields or wrong types are rejected with HTTP 422 before any ML code runs
+    - extra="forbid" rejects unknown fields, so a typo cannot silently change model inputs
     """
     model_config = ConfigDict(
         extra="forbid",
@@ -74,7 +76,7 @@ class PatientRecord(BaseModel):
     E: int
     F: int
     H: int
-    I: int
+    I: int  # noqa: E741  (column name comes from the dataset)
     J: int
     K: int
     L: int
@@ -107,214 +109,129 @@ class HealthResponse(BaseModel):
     status: str
     model_loaded: bool
     model_version: str
+    git_commit: str
 
 
 # -------------------------------------------------------------------
-# 2) Small Local Helpers
+# 2) Model loading (local file or W&B Model Registry)
 # -------------------------------------------------------------------
-def _require_list(cfg: Dict[str, Any], key: str) -> List[Any]:
-    if key not in cfg:
-        raise ValueError(f"Missing required config key: {key}")
-    value = cfg.get(key)
-    if not isinstance(value, list):
-        raise ValueError(
-            f"Config key '{key}' must be a list, got {type(value).__name__}")
-    return value
+def _load_model(cfg: Dict[str, Any]):
+    """
+    Return (model, model_version)
 
+    MODEL_SOURCE=local  -> load models/model.joblib (path from config.yaml)
+    MODEL_SOURCE=wandb  -> download the artifact with alias WANDB_MODEL_ALIAS (default "prod")
+    """
+    model_source = os.getenv("MODEL_SOURCE", "local").strip().lower()
 
-def _dedupe_preserve_order(items: List[Any]) -> List[Any]:
-    seen = set()
-    out: List[Any] = []
-    for x in items:
-        if x not in seen:
-            seen.add(x)
-            out.append(x)
-    return out
+    if model_source == "wandb":
+        entity = os.getenv("WANDB_ENTITY")
+        alias = os.getenv("WANDB_MODEL_ALIAS", "prod")
+        wandb_cfg = cfg.get("wandb") or {}
+        project = wandb_cfg.get("project")
+        artifact_name = wandb_cfg.get("model_artifact_name")
+        if not entity or not project or not artifact_name:
+            raise ValueError("MODEL_SOURCE=wandb needs WANDB_ENTITY (.env) plus wandb.project and "
+                             "wandb.model_artifact_name (config.yaml)")
 
+        artifact_path = f"{entity}/{project}/{artifact_name}:{alias}"
+        logger.info("Downloading model from W&B registry: %s", artifact_path)
+        # wandb reads WANDB_API_KEY from the environment automatically
+        artifact_dir = wandb.Api().artifact(artifact_path).download()
+        model_path = Path(artifact_dir) / Path(require_str(cfg["paths"], "model_artifact")).name
+        return joblib.load(model_path), artifact_path
 
-def _configured_feature_columns(cfg: Dict[str, Any]) -> List[str]:
-    features_cfg = require_section(cfg, "features")
-    cols = _dedupe_preserve_order(
-        list(_require_list(features_cfg, "quantile_bin"))
-        + list(_require_list(features_cfg, "categorical_onehot"))
-        + list(_require_list(features_cfg, "numeric_passthrough"))
-        + list(_require_list(features_cfg, "binary_sum_cols"))
-    )
-    return [str(c) for c in cols]
+    model_path = resolve_repo_path(PROJECT_ROOT, require_str(require_section(cfg, "paths"), "model_artifact"))
+    logger.info("Loading local model artifact: %s", model_path)
+    if not model_path.exists():
+        raise FileNotFoundError(f"Model file missing at {model_path}. Run: python -m src.main")
+    return joblib.load(model_path), model_path.name
 
 
 # -------------------------------------------------------------------
-# 3) Lifespan: Load shared resources once at API startup
+# 3) Lifespan: load config and model ONCE at startup, flush logs at shutdown
 # -------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    app.state.global_config = {}
+    app.state.model_pipeline = None
+    app.state.model_version = "unloaded"
+
     try:
-        project_root = Path(__file__).resolve().parents[1]
-        app.state.global_config = load_config(project_root / "config.yaml")
-        paths_cfg = require_section(app.state.global_config, "paths")
-
-        model_source = os.getenv("MODEL_SOURCE", "local").lower()
-
-        if model_source == "wandb":
-            logger.info(
-                "MODEL_SOURCE=wandb -> fetching model from W&B Registry")
-
-            wandb_entity = os.getenv("WANDB_ENTITY")
-            artifact_alias = os.getenv("WANDB_MODEL_ALIAS", "prod")
-
-            wandb_cfg = app.state.global_config.get("wandb", {})
-            wandb_project = wandb_cfg.get("project")
-            artifact_name = wandb_cfg.get("model_artifact_name")
-
-            if not wandb_entity or not wandb_project or not artifact_name:
-                raise ValueError(
-                    "Missing required W&B credentials or config settings")
-
-            artifact_path = f"{wandb_entity}/{wandb_project}/{artifact_name}:{artifact_alias}"
-
-            wandb.login(key=os.getenv("WANDB_API_KEY"), relogin=True)
-            api = wandb.Api()
-            artifact = api.artifact(artifact_path)
-            artifact_dir = artifact.download()
-            model_path = Path(artifact_dir) / "model.joblib"
-
-            logger.info("Downloaded model from W&B: %s", artifact_path)
-
-            if not model_path.exists():
-                logger.error(
-                    "Model file missing inside downloaded artifact at %s", model_path)
-                app.state.model_pipeline = None
-                app.state.model_version = "missing"
-            else:
-                app.state.model_pipeline = joblib.load(model_path)
-                app.state.model_version = artifact_path
-                logger.info(
-                    "Startup complete, model loaded from W&B artifact %s", artifact_path)
-
-        else:
-            logger.info("MODEL_SOURCE=local -> using local model artifact")
-
-            model_path = resolve_repo_path(
-                project_root,
-                require_str(paths_cfg, "model_artifact"),
-            )
-
-            if not model_path.exists():
-                logger.error("Model file missing at %s", model_path)
-                app.state.model_pipeline = None
-                app.state.model_version = "missing"
-            else:
-                app.state.model_pipeline = joblib.load(model_path)
-                app.state.model_version = model_path.name
-                logger.info(
-                    "Startup complete, model loaded from %s", model_path)
-
-    except Exception as e:
-        logger.exception("Startup failed: %s", str(e))
-        app.state.global_config = {}
-        app.state.model_pipeline = None
+        cfg = load_config(PROJECT_ROOT / "config.yaml")
+        app.state.global_config = cfg
+        # Console only: container platforms such as Render collect stdout as the service log
+        configure_logging(log_level=str((cfg.get("logging") or {}).get("level", "INFO")))
+        app.state.model_pipeline, app.state.model_version = _load_model(cfg)
+        logger.info("Startup complete | model_version=%s", app.state.model_version)
+    except Exception:
+        # The API still starts so /health can report the problem (503) instead of crashing silently
+        logger.exception("Startup failed, the model is not loaded")
         app.state.model_version = "startup_error"
 
     yield
+
+    # Do not lose buffered prediction logs when the server stops
+    _flush_buffer(app.state.global_config, force=True)
     logger.info("API shutdown complete")
 
 
-app = FastAPI(title="Opioid Risk Predictor API",
-              version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Opioid Risk Predictor API", version="1.0.0", lifespan=lifespan)
 
 
 # -------------------------------------------------------------------
-# 4) Observability Architecture (Layer 1 & Layer 2)
+# 4) Observability
 # -------------------------------------------------------------------
-
-# --- LAYER 1: System Monitoring Middleware ---
+# Layer 1: every HTTP request gets a correlation ID, status code and latency in the logs
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start_time = time.time()
-
     correlation_id = str(uuid.uuid4())
     request.state.correlation_id = correlation_id
 
     response = await call_next(request)
 
-    latency = time.time() - start_time
-    model_version = getattr(app.state, "model_version", "unloaded")
-
     logger.info(
         "correlation_id=%s path=%s method=%s status=%s latency_s=%.4f model_version=%s",
-        correlation_id,
-        request.url.path,
-        request.method,
-        response.status_code,
-        latency,
-        model_version,
+        correlation_id, request.url.path, request.method, response.status_code,
+        time.time() - start_time, getattr(app.state, "model_version", "unloaded"),
     )
-
     response.headers["X-Correlation-ID"] = correlation_id
     return response
 
 
-# --- LAYER 2: ML Monitoring Buffer ---
-LOG_BUFFER = []
-# Protects our buffer from race conditions during concurrent API requests
-BUFFER_LOCK = Lock()
-BATCH_SIZE = 1
+# Layer 2: prediction rows are buffered and sent to W&B in batches (a Table per batch)
+LOG_BUFFER: List[Dict[str, Any]] = []
+BUFFER_LOCK = Lock()  # protects the buffer when requests arrive at the same time
 
 
-def flush_logs_to_wandb(batch_data: list, project_name: str):
-    """Ephemeral W&B run to securely log a batch of inference rows as a Table."""
-    if not batch_data:
+def flush_logs_to_wandb(batch_data: List[Dict[str, Any]], project_name: str) -> None:
+    """Send one batch of prediction logs to W&B. Never raises: monitoring must not break serving."""
+    if not batch_data or os.getenv("WANDB_MODE", "").lower() == "disabled":
         return
-
-    if os.getenv("WANDB_MODE", "").lower() == "disabled":
-        logger.info("Skipping W&B flush because WANDB_MODE=disabled")
-        return
-
     try:
-        wandb_entity = os.getenv("WANDB_ENTITY")
-        run = wandb.init(
-            entity=wandb_entity if wandb_entity else None,
-            project=project_name,
-            job_type="inference-batch",
-            reinit=True,
-        )
-
-        feature_keys = list(batch_data[0]["features"].keys())
-        columns = [
-            "correlation_id",
-            "req_id",
-            "timestamp",
-            "path",
-            "status_code",
-            "model_version",
-            "latency_s",
-            "prediction",
-            "probability",
-        ] + feature_keys
-
-        table = wandb.Table(columns=columns)
-
-        for item in batch_data:
-            row = [
-                item["correlation_id"],
-                item["req_id"],
-                item["timestamp"],
-                item["path"],
-                item["status_code"],
-                item["model_version"],
-                item["latency_s"],
-                item["prediction"],
-                item["probability"],
-            ] + [item["features"].get(k) for k in feature_keys]
-
-            table.add_data(*row)
-
-        run.log({"inference_logs": table})
+        run = wandb.init(entity=os.getenv("WANDB_ENTITY") or None, project=project_name,
+                         job_type="inference-batch", reinit=True)
+        run.log({"inference_logs": wandb.Table(dataframe=pd.DataFrame(batch_data))})
         run.finish()
-        logger.info("Flushed %s ML logs to W&B", len(batch_data))
-
+        logger.info("Flushed %s prediction logs to W&B", len(batch_data))
     except Exception as e:
-        logger.error("Failed to flush logs to W&B: %s", e)
+        logger.error("Failed to flush prediction logs to W&B: %s", e)
+
+
+def _flush_buffer(cfg: Dict[str, Any], force: bool = False,
+                  background_tasks: Optional[BackgroundTasks] = None) -> None:
+    batch_size = int((cfg.get("api") or {}).get("wandb_log_batch_size", 20))
+    project = (cfg.get("wandb") or {}).get("project", "mlops-project")
+    with BUFFER_LOCK:
+        if not LOG_BUFFER or (len(LOG_BUFFER) < batch_size and not force):
+            return
+        batch = LOG_BUFFER.copy()
+        LOG_BUFFER.clear()
+    if background_tasks is not None:
+        background_tasks.add_task(flush_logs_to_wandb, batch, project)
+    else:
+        flush_logs_to_wandb(batch, project)
 
 
 # -------------------------------------------------------------------
@@ -327,135 +244,72 @@ def root() -> Dict[str, str]:
 
 @app.get("/health", response_model=HealthResponse)
 def health_check() -> HealthResponse:
+    """
+    Readiness check used by Docker HEALTHCHECK, Render and the deploy smoke test
+    - 200 only when the model is loaded
+    - git_commit lets the deploy workflow confirm the NEW version is live
+    """
     model_loaded = getattr(app.state, "model_pipeline", None) is not None
-    model_version = getattr(app.state, "model_version", "unloaded")
-
-    if not model_loaded:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "status": "model_not_loaded",
-                "model_loaded": False,
-                "model_version": model_version,
-            },
-        )
-
-    return HealthResponse(
-        status="ok",
-        model_loaded=True,
-        model_version=model_version,
+    body = HealthResponse(
+        status="ok" if model_loaded else "model_not_loaded",
+        model_loaded=model_loaded,
+        model_version=getattr(app.state, "model_version", "unloaded"),
+        git_commit=os.getenv("RENDER_GIT_COMMIT", "local"),
     )
+    if not model_loaded:
+        raise HTTPException(status_code=503, detail=body.model_dump())
+    return body
 
 
 @app.post("/predict", response_model=PredictResponse)
-def predict(
-    req: PredictRequest,
-    request: Request,
-    background_tasks: BackgroundTasks,
-) -> PredictResponse:
-    model_pipeline = getattr(app.state, "model_pipeline", None)
-    global_config = getattr(app.state, "global_config", {})
+def predict(req: PredictRequest, request: Request, background_tasks: BackgroundTasks) -> PredictResponse:
+    model = getattr(app.state, "model_pipeline", None)
+    cfg = getattr(app.state, "global_config", {})
     model_version = getattr(app.state, "model_version", "unloaded")
 
-    if model_pipeline is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Model is not loaded. Check startup logs, W&B credentials, artifact alias, and model availability.")
+    if model is None:
+        raise HTTPException(status_code=503, detail="Model is not loaded. Check /health and the startup logs")
 
     try:
-        # Start timing the inference specifically for our ML Logs
-        inference_start_time = time.time()
-        correlation_id = getattr(
-            request.state, "correlation_id", "missing_correlation_id")
-        records_dicts = [r.model_dump() for r in req.records]
-        df_raw = pd.DataFrame(records_dicts)
-        df_clean = clean_dataframe(df_raw, target_column=None)
+        start = time.time()
+        records = [r.model_dump() for r in req.records]
 
-        configured_feature_cols = _configured_feature_columns(global_config)
-        validation_cfg = require_section(global_config, "validation")
-        numeric_non_negative_cols = validation_cfg.get(
-            "numeric_non_negative_cols", [])
-
+        # Same clean -> validate -> infer path as the batch pipeline in main.py (zero training-serving skew)
+        df_clean = clean_dataframe(pd.DataFrame(records), target_column=None)
+        validation_cfg = require_section(cfg, "validation")
         validate_dataframe(
             df=df_clean,
-            required_columns=configured_feature_cols,
-            check_missing_values=bool(
-                validation_cfg.get("check_missing_values", False)),
-            target_column=None,
-            target_allowed_values=None,
-            numeric_non_negative_cols=numeric_non_negative_cols,
+            required_columns=get_feature_columns(cfg),
+            check_missing_values=bool(validation_cfg.get("check_missing_values", False)),
+            numeric_non_negative_cols=validation_cfg.get("numeric_non_negative_cols", []),
         )
 
-        problem_cfg = require_section(global_config, "problem")
-        identifier_col = require_str(problem_cfg, "identifier_column")
+        id_col = require_str(require_section(cfg, "problem"), "identifier_column")
+        ids = df_clean[id_col].astype(str).tolist()
+        is_classification = require_str(cfg["problem"], "problem_type").lower() == "classification"
+        include_proba = is_classification and bool((cfg.get("run") or {}).get("include_proba_if_classification", True))
 
-        ids = (
-            df_clean[identifier_col].astype(str).tolist()
-            if identifier_col in df_clean.columns
-            else [str(i) for i in range(len(df_clean))]
-        )
-        X_infer = df_clean.drop(
-            columns=[identifier_col]) if identifier_col in df_clean.columns else df_clean
-
-        run_cfg = require_section(global_config, "run")
-        include_proba = bool(run_cfg.get(
-            "include_proba_if_classification", True))
-
-        try:
-            df_pred = run_inference(
-                model=model_pipeline, X_infer=X_infer, include_proba=include_proba)
-        except TypeError:
-            df_pred = run_inference(model=model_pipeline, X_infer=X_infer)
-
-        inference_latency = time.time() - inference_start_time
-        current_time = time.time()
-        preds: List[PredictionItem] = []
-
-        with BUFFER_LOCK:
-            for i in range(len(ids)):
-                pred_val = int(df_pred.iloc[i]["prediction"])
-                prob_val: Optional[float] = None
-
-                if "proba" in df_pred.columns:
-                    prob_val = float(df_pred.iloc[i]["proba"])
-
-                preds.append(
-                    PredictionItem(
-                        ID=ids[i], prediction=pred_val, probability=prob_val)
-                )
-
-                LOG_BUFFER.append({
-                    "correlation_id": correlation_id,
-                    "req_id": ids[i],
-                    "timestamp": current_time,
-                    "path": "/predict",
-                    "status_code": 200,
-                    "model_version": model_version,
-                    "latency_s": inference_latency,
-                    "prediction": pred_val,
-                    "probability": prob_val,
-                    "features": records_dicts[i],
-                })
-
-            if len(LOG_BUFFER) >= BATCH_SIZE:
-                batch_copy = LOG_BUFFER.copy()
-                LOG_BUFFER.clear()
-                wandb_project = global_config.get("wandb", {}).get(
-                    "project", "opioid-risk-classification")
-                background_tasks.add_task(
-                    flush_logs_to_wandb, batch_copy, wandb_project)
-
-        return PredictResponse(
-            model_version=model_version,
-            predictions=preds,
-        )
-
+        df_pred = run_inference(model=model, X_infer=df_clean.drop(columns=[id_col]), include_proba=include_proba)
+        latency = time.time() - start
     except ValueError as e:
-        logger.error("Validation error: %s", str(e))
+        # Business-rule violations (e.g. negative rx_ds) are client errors, not server errors
+        logger.warning("Validation error: %s", e)
         raise HTTPException(status_code=422, detail=str(e)) from e
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.exception("Prediction failed: %s", str(e))
-        raise HTTPException(
-            status_code=500, detail="Internal Server Error") from e
+        logger.exception("Prediction failed")
+        raise HTTPException(status_code=500, detail="Internal Server Error") from e
+
+    predictions: List[PredictionItem] = []
+    correlation_id = getattr(request.state, "correlation_id", "missing")
+    with BUFFER_LOCK:
+        for i, row_id in enumerate(ids):
+            pred = int(df_pred.iloc[i]["prediction"])
+            proba = float(df_pred.iloc[i]["proba"]) if "proba" in df_pred.columns else None
+            predictions.append(PredictionItem(ID=row_id, prediction=pred, probability=proba))
+            LOG_BUFFER.append({
+                "correlation_id": correlation_id, "timestamp": time.time(), "model_version": model_version,
+                "latency_s": latency, "prediction": pred, "probability": proba, **records[i],
+            })
+
+    _flush_buffer(cfg, background_tasks=background_tasks)
+    return PredictResponse(model_version=model_version, predictions=predictions)

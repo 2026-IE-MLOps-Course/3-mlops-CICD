@@ -1,15 +1,20 @@
 # src/clean_data.py
+"""
+Educational Goal:
+- Why this module exists in an MLOps system: To isolate dataset-specific formatting and quality filtering from
+  model training, ensuring upstream data anomalies don't cause downstream pipeline crashes.
+- Responsibility (separation of concerns): Pure data transformations (standardizing column names,
+  deduplication, dropping missing values) and data observability (logging dropped rows). Strictly NO file I/O
+  and NO model fitting.
+- Pipeline contract (inputs and outputs): Inputs are the raw Pandas DataFrame and the target column name.
+  Output is a cleaned Pandas DataFrame that is guaranteed to have the target column, ready for validation and
+  splitting.
+
+"""
+
 import logging
 from typing import Optional
 import pandas as pd
-
-"""
-Educational Goal:
-- Why this module exists in an MLOps system: To isolate dataset-specific formatting and quality filtering from model training, ensuring upstream data anomalies don't cause downstream pipeline crashes.
-- Responsibility (separation of concerns): Pure data transformations (standardizing column names, deduplication, dropping missing values) and data observability (logging dropped rows). Strictly NO file I/O and NO model fitting.
-- Pipeline contract (inputs and outputs): Inputs are the raw Pandas DataFrame and the target column name. Output is a cleaned Pandas DataFrame that is guaranteed to have the target column, ready for validation and splitting.
-
-"""
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +37,7 @@ def clean_dataframe(df_raw: pd.DataFrame, target_column: Optional[str] = None) -
 
     if df_raw is None:
         raise ValueError(
-            "df_raw is None. Check src/load_data.py and RAW_DATA_PATH in src/main.py")
+            "df_raw is None. Check src/load_data.py and paths.raw_data in config.yaml")
 
     if not isinstance(df_raw, pd.DataFrame):
         raise TypeError(
@@ -73,7 +78,7 @@ def clean_dataframe(df_raw: pd.DataFrame, target_column: Optional[str] = None) -
             else:
                 raise ValueError(
                     f"Fatal: target column '{target_column}' missing after cleaning. "
-                    "Check SETTINGS['target_column'] in src/main.py and your raw CSV headers"
+                    "Check problem.target_column in config.yaml and your raw CSV headers"
                 )
 
         # Supervised learning requires a target label for every training row

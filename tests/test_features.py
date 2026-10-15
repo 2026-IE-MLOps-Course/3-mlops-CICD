@@ -3,7 +3,8 @@
 """
 Educational Goal:
 - Why this test exists in an MLOps system: Validate the feature engineering contract without relying on training code
-- Responsibility (separation of concerns): Ensure get_feature_preprocessor builds a valid ColumnTransformer and fails fast on bad config
+- Responsibility (separation of concerns): Ensure get_feature_preprocessor builds a valid ColumnTransformer
+  and fails fast on bad config
 - Pipeline contract (inputs and outputs): Returns a configured ColumnTransformer or raises early when config is invalid
 """
 

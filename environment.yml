@@ -1,28 +1,35 @@
+# environment.yml (human-readable contract)
+# After ANY change here, regenerate the machine contract used by CI and Docker:
+#   conda-lock -p linux-64 -f environment.yml
+# then commit both files together
 name: mlops
 channels:
   - conda-forge
-  - defaults
 dependencies:
-  - python>=3.9
-  - pandas
+  - python=3.12
+  # Data and modelling
+  - pandas>=2.2
   - numpy
-  - scikit-learn
+  - scikit-learn>=1.7
   - joblib
-  - matplotlib
-  - seaborn
-  - shap
-  - lime
-  - jupyter
-  - ipykernel
-  - pytest
-  - pytest-cov
+  # Configuration and secrets
   - pyyaml
   - python-dotenv
-  - joblib
+  # Experiment tracking and model registry
   - wandb
+  # Serving
   - fastapi
   - uvicorn
-  - pydantic
-  - httpx
+  - pydantic>=2
+  - httpx # used by FastAPI TestClient in tests
+  # Notebooks (exploration only)
+  - jupyter
+  - ipykernel
+  - matplotlib
+  # Quality: tests, coverage, style
+  - pytest
+  - pytest-cov
+  - flake8
+  # Locking tool
   - conda-lock
   - pip

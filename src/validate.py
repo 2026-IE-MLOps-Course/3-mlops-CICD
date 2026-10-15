@@ -1,15 +1,16 @@
 # src/validate.py
-import logging
-from typing import Any, List, Optional
-import pandas as pd
-
 """
 Educational Goal:
 - Why this module exists in an MLOps system: Fail fast on obvious data issues before expensive steps run
 - Responsibility (separation of concerns): Only validation checks, no cleaning, features, training, or metrics logic
-- Pipeline contract (inputs and outputs): Input is a DataFrame and constraint lists, output is True or a raised ValueError
+- Pipeline contract (inputs and outputs): Input is a DataFrame and constraint lists, output is True or a
+  raised ValueError
 
 """
+
+import logging
+from typing import Any, List, Optional
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ def validate_dataframe(
 
     if df is None:
         raise ValueError(
-            "Validation failed: df is None. Check src/load_data.py and RAW_DATA_PATH")
+            "Validation failed: df is None. Check src/load_data.py and paths.raw_data in config.yaml")
 
     if not isinstance(df, pd.DataFrame):
         raise TypeError(

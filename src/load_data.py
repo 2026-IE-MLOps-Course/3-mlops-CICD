@@ -38,7 +38,7 @@ def load_raw_data(raw_data_path: Path) -> pd.DataFrame:
     if not raw_data_path.is_file():
         raise ValueError(
             f"Ingestion Error: {raw_data_path} is a directory, not a file. "
-            "Check RAW_DATA_PATH in src/main.py"
+            "Check paths.raw_data in config.yaml"
         )
 
     # 3) Execute the load via Utility
