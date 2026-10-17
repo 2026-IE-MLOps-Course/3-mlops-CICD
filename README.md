@@ -64,6 +64,8 @@ uvicorn src.api:app --reload
 python scripts/smoke_test.py --url http://127.0.0.1:8000
 ```
 
+> **Windows:** always run inside the activated environment (`conda activate mlops`, then `python -m src.main`), or use `conda run -n mlops python -m src.main`. Calling the environment's `python.exe` directly, for example from a VS Code interpreter that did not activate the environment, can crash with `0xC06D007F` during model calibration because Windows cannot find the environment's maths libraries.
+
 Outputs of step 4:
 
 - `data/processed/clean.csv` cleaned training data
