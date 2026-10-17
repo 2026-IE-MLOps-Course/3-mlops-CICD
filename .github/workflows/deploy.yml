@@ -36,6 +36,17 @@ jobs:
         runs-on: ubuntu-latest
         timeout-minutes: 30
         steps:
+            - name: Check required deploy settings
+              env:
+                  HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+                  SERVICE_URL: ${{ vars.RENDER_SERVICE_URL }}
+              run: |
+                  missing=0
+                  if [ -z "$HOOK" ]; then echo "::error::Secret RENDER_DEPLOY_HOOK_URL is not set (Settings > Secrets and variables > Actions > Secrets)"; missing=1; fi
+                  if [ -z "$SERVICE_URL" ]; then echo "::error::Variable RENDER_SERVICE_URL is not set (Settings > Secrets and variables > Actions > Variables, not Secrets)"; missing=1; fi
+                  case "$SERVICE_URL" in http://*|https://*|"") ;; *) echo "::error::RENDER_SERVICE_URL must start with https://"; missing=1;; esac
+                  exit $missing
+
             - name: Checkout the release
               uses: actions/checkout@v4
               with:
@@ -49,7 +60,6 @@ jobs:
               env:
                   HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
               run: |
-                  if [ -z "$HOOK" ]; then echo "Missing secret RENDER_DEPLOY_HOOK_URL"; exit 1; fi
                   curl --fail --silent --show-error -X POST "${HOOK}&ref=${{ steps.commit.outputs.sha }}"
 
             - name: Set up Python
