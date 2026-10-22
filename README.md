@@ -165,6 +165,7 @@ uvicorn src.api:app --reload
 - `GET /health` returns 200 only when the model is loaded (readiness). It also returns `git_commit`
 - `POST /predict` validates the JSON with Pydantic, then runs the same `clean_dataframe`, `validate_dataframe` and `run_inference` as the pipeline
 - `GET /docs` interactive Swagger page to try requests
+- `GET /ui` simple web interface: upload a patient CSV (or load the sample), score it, sort by risk and download the results. Live at `https://opioid-risk-api.onrender.com/ui`
 - Every response carries an `X-Correlation-ID` header, also written to the logs
 
 Example request: [`scripts/sample_request.json`](scripts/sample_request.json)
@@ -297,6 +298,10 @@ Generated and ignored by Git: `models/`, `reports/`, `logs/`, `wandb/`, `artifac
 ## 12. Changelog
 
 Format: [Keep a Changelog](https://keepachangelog.com), versions follow [Semantic Versioning](https://semver.org).
+
+### [2.1.0] - 2026-10-22
+
+- Added `GET /ui`: minimal web interface (`src/static/index.html`) to test the deployed model with a CSV upload
 
 ### [2.0.0] - 2026-10-09
 

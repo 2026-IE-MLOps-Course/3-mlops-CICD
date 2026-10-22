@@ -55,6 +55,15 @@ def test_root_endpoint():
         assert "message" in response.json()
 
 
+def test_ui_page_served():
+    """The browser interface is served by the API itself and calls the real endpoints."""
+    with TestClient(app) as client:
+        response = client.get("/ui")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/html")
+        assert "/predict" in response.text and "/health" in response.text
+
+
 def test_health_reports_503_when_model_missing():
     """Readiness, not just liveness: no model means the service must not receive traffic."""
     with TestClient(app) as client:

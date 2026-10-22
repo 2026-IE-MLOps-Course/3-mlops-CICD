@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Opioid Risk Screening</title>
+<meta name="description" content="Upload a patient CSV and score opioid use disorder risk with the deployed model">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #f6f7f5; --surface: #ffffff; --ink: #14212b; --muted: #5d6b74; --faint: #8a979f;
+  --line: #e2e6e3; --accent: #0f5e66; --accent-soft: #e5efee; --accent-ink: #ffffff;
+  --risk: #b4541a; --risk-soft: #fbeee4; --ok: #2f6b4f; --ok-soft: #e7f1ec;
+  --error: #a3312b; --error-soft: #fbeceb; --bar: #d9e3e1;
+  --radius: 10px; --shadow: 0 1px 2px rgba(20,33,43,.04), 0 4px 16px rgba(20,33,43,.04);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1518; --surface: #161e22; --ink: #e7ecee; --muted: #a2afb6; --faint: #75838b;
+    --line: #26323a; --accent: #5fb3ad; --accent-soft: #19302f; --accent-ink: #0f1518;
+    --risk: #e39461; --risk-soft: #33231a; --ok: #74c19b; --ok-soft: #17291f;
+    --error: #ec8a83; --error-soft: #341c1b; --bar: #26323a; --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1518; --surface: #161e22; --ink: #e7ecee; --muted: #a2afb6; --faint: #75838b;
+  --line: #26323a; --accent: #5fb3ad; --accent-soft: #19302f; --accent-ink: #0f1518;
+  --risk: #e39461; --risk-soft: #33231a; --ok: #74c19b; --ok-soft: #17291f;
+  --error: #ec8a83; --error-soft: #341c1b; --bar: #26323a; --shadow: none;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 15px/1.55 Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 16px; }
+header.top { border-bottom: 1px solid var(--line); background: var(--surface); }
+header.top .wrap { display: flex; align-items: center; justify-content: space-between; gap: 12px; height: 60px; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 600; letter-spacing: -.01em; }
+.brand svg { flex: none; }
+.status { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; white-space: nowrap; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+.dot.ok { background: var(--ok); } .dot.bad { background: var(--error); }
+main { padding: 40px 0 24px; }
+.eyebrow { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--accent); font-weight: 600; }
+h1 { font-family: "Source Serif 4", Georgia, serif; font-weight: 600; font-size: clamp(28px, 4vw, 38px);
+  line-height: 1.15; letter-spacing: -.015em; margin: 8px 0 10px; }
+.lead { color: var(--muted); max-width: 640px; margin: 0 0 32px; font-size: 16px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 24px; margin-bottom: 20px; }
+.card h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; display: flex; align-items: center; gap: 10px; }
+.step { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%;
+  background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 600; }
+.sub { color: var(--muted); font-size: 14px; margin: 0 0 18px; }
+.drop { display: block; border: 1.5px dashed var(--line); border-radius: var(--radius); padding: 28px 16px;
+  text-align: center; cursor: pointer; transition: border-color .15s, background .15s; }
+.drop:hover, .drop.over { border-color: var(--accent); background: var(--accent-soft); }
+.drop strong { color: var(--accent); font-weight: 600; }
+.drop small { display: block; color: var(--faint); margin-top: 4px; font-size: 13px; }
+.drop input { display: none; }
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.actions { margin-top: 14px; }
+button, .btn { font: inherit; font-size: 14px; font-weight: 500; border-radius: 8px; padding: 8px 14px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink); text-decoration: none; }
+button:hover, .btn:hover { border-color: var(--faint); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); padding: 10px 18px; }
+button.primary:hover { filter: brightness(1.08); }
+button:disabled { opacity: .45; cursor: not-allowed; filter: none; }
+button.link { border: 0; background: none; color: var(--accent); padding: 8px 4px; }
+details { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
+summary { cursor: pointer; font-size: 14px; color: var(--muted); }
+.schema { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px; }
+.schema td { padding: 6px 8px 6px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+.schema td:first-child { white-space: nowrap; width: 1%; padding-right: 20px; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px;
+  background: var(--accent-soft); color: var(--accent); padding: 1px 6px; border-radius: 4px; }
+.checks { display: grid; gap: 8px; margin: 18px 0 0; padding: 0; list-style: none; font-size: 14px; }
+.checks li { display: flex; gap: 10px; align-items: flex-start; }
+.checks .ic { flex: none; width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center;
+  font-size: 11px; font-weight: 700; margin-top: 2px; }
+.ic.ok { background: var(--ok-soft); color: var(--ok); }
+.ic.warn { background: var(--risk-soft); color: var(--risk); }
+.ic.err { background: var(--error-soft); color: var(--error); }
+.checks .muted { color: var(--muted); }
+.banner { border-radius: 8px; padding: 12px 14px; font-size: 14px; margin-top: 16px; background: var(--error-soft); color: var(--error); }
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin: 4px 0 20px; }
+.metric { border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; }
+.metric .k { font-size: 12px; color: var(--muted); }
+.metric .v { font-family: "Source Serif 4", Georgia, serif; font-size: 28px; font-weight: 600; line-height: 1.2; margin-top: 2px; }
+.metric .v small { font-family: Inter, system-ui, sans-serif; font-size: 13px; color: var(--muted); font-weight: 400; margin-left: 4px; }
+.toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; }
+.toggle { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); cursor: pointer; }
+.toggle input { accent-color: var(--accent); width: 16px; height: 16px; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+table.results { width: 100%; border-collapse: collapse; font-size: 14px; min-width: 620px; }
+.results th { text-align: left; font-size: 12px; font-weight: 500; color: var(--muted); padding: 10px 14px;
+  border-bottom: 1px solid var(--line); background: var(--bg); position: sticky; top: 0; }
+.results td { padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.results tr:last-child td { border-bottom: 0; }
+.results .num { text-align: right; font-variant-numeric: tabular-nums; }
+.rank { color: var(--faint); font-variant-numeric: tabular-nums; width: 1%; }
+.prob { display: flex; align-items: center; gap: 10px; min-width: 180px; }
+.prob .track { flex: 1; height: 6px; border-radius: 3px; background: var(--bar); overflow: hidden; }
+.prob .fill { height: 100%; border-radius: 3px; background: var(--accent); }
+.prob .fill.hi { background: var(--risk); }
+.prob span { width: 46px; text-align: right; font-variant-numeric: tabular-nums; }
+.pill { display: inline-block; font-size: 12px; font-weight: 500; padding: 2px 10px; border-radius: 999px; white-space: nowrap; }
+.pill.hi { background: var(--risk-soft); color: var(--risk); }
+.pill.lo { background: var(--ok-soft); color: var(--ok); }
+.scroll { max-height: 520px; overflow-y: auto; }
+.empty { color: var(--faint); text-align: center; padding: 28px; font-size: 14px; }
+.spinner { width: 14px; height: 14px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+  display: inline-block; animation: spin .7s linear infinite; vertical-align: -2px; margin-right: 6px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+footer { color: var(--faint); font-size: 13px; padding: 8px 0 40px; }
+footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line); padding-top: 18px; }
+footer a { color: var(--muted); }
+.hidden { display: none !important; }
+@media (max-width: 560px) {
+  .card { padding: 18px; }
+  .status .long { display: none; }
+}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <div class="brand">
+      <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true">
+        <rect x="1" y="1" width="24" height="24" rx="7" fill="none" stroke="var(--accent)" stroke-width="1.6"/>
+        <path d="M5 14h4l2-5 3 9 2-6 1 2h4" fill="none" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>Opioid Risk Screening</span>
+    </div>
+    <div class="status" id="status" title="Service readiness from /health">
+      <span class="dot" id="statusDot"></span><span id="statusText">Checking service</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="eyebrow">Clinical decision support &middot; teaching demo</div>
+  <h1>Opioid use disorder risk screening</h1>
+  <p class="lead">Upload a patient list as a CSV file. The deployed model returns a calibrated risk probability for each patient, so care managers can prioritise outreach.</p>
+
+  <section class="card" aria-labelledby="h-data">
+    <h2 id="h-data"><span class="step">1</span>Patient data</h2>
+    <p class="sub">One row per patient, with the 20 columns of the model contract.</p>
+
+    <label class="drop" id="drop">
+      <input type="file" id="file" accept=".csv,text/csv">
+      <div><strong>Choose a CSV file</strong> or drag it here</div>
+      <small>Comma or semicolon separated &middot; processed in your browser, sent only to this service</small>
+    </label>
+
+    <div class="row actions">
+      <button type="button" id="sampleBtn">Load sample (10 patients)</button>
+      <button type="button" id="templateBtn">Download template</button>
+    </div>
+
+    <ul class="checks hidden" id="checks"></ul>
+    <div class="banner hidden" id="dataError" role="alert"></div>
+
+    <details>
+      <summary>Expected schema</summary>
+      <table class="schema">
+        <tr><td><code>ID</code></td><td>Patient identifier (text). Used to join results back to your records</td></tr>
+        <tr><td><code>rx_ds</code></td><td>Opioid days supplied (number, 0 or more)</td></tr>
+        <tr><td><code>Low_inc</code></td><td>Low-income indicator (0 or 1)</td></tr>
+        <tr><td><code>SURG</code></td><td>Indicator flag (0 or 1)</td></tr>
+        <tr><td><code>A</code> to <code>T</code></td><td>Indicator flags <code>A B C D E F H I J K L M N R S T</code> (0 or 1)</td></tr>
+        <tr><td>Other columns</td><td>Ignored, for example the target <code>OD</code> or <code>V</code></td></tr>
+      </table>
+      <p class="sub" style="margin:12px 0 0">Header names are not case sensitive, and spaces count as underscores (<code>rx ds</code> works). Rows with empty or non-numeric values are skipped and listed.</p>
+    </details>
+
+    <div class="row actions" style="margin-top:20px">
+      <button type="button" class="primary" id="scoreBtn" disabled>Score patients</button>
+      <span class="sub" style="margin:0" id="scoreHint">Load data to continue</span>
+    </div>
+  </section>
+
+  <section class="card hidden" id="resultsCard" aria-labelledby="h-res">
+    <h2 id="h-res"><span class="step">2</span>Risk scores</h2>
+    <p class="sub" id="resultsSub"></p>
+
+    <div class="metrics">
+      <div class="metric"><div class="k">Patients scored</div><div class="v" id="mScored">0</div></div>
+      <div class="metric"><div class="k">Flagged for outreach</div><div class="v" id="mFlagged">0</div></div>
+      <div class="metric"><div class="k">Median risk probability</div><div class="v" id="mMedian">0%</div></div>
+    </div>
+
+    <div class="toolbar">
+      <label class="toggle"><input type="checkbox" id="onlyFlagged"> Show flagged patients only</label>
+      <button type="button" id="downloadBtn">Download results (CSV)</button>
+    </div>
+
+    <div class="tablewrap scroll">
+      <table class="results">
+        <thead><tr>
+          <th>#</th><th>Patient ID</th><th>Risk probability</th><th>Model flag</th>
+          <th class="num">Days supplied</th><th class="num">Flags set</th>
+        </tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Synthetic, de-identified data. Decision support only, not for diagnosis or treatment decisions.</span>
+    <span><a href="/docs">API reference</a> &middot; <a href="/health">Health</a></span>
+  </div>
+</footer>
+
+<script>
+(() => {
+  "use strict";
+  const FIELDS = ["ID", "rx_ds", "A", "B", "C", "D", "E", "F", "H", "I", "J", "K", "L", "M", "N", "R", "S", "T", "Low_inc", "SURG"];
+  const FLAGS = FIELDS.slice(2);
+  const CHUNK = 500;
+  const SAMPLE = [
+    "ID,Low_inc,SURG,rx ds,A,B,C,D,E,F,H,I,J,K,L,M,N,R,S,T,V",
+    "1001,0,1,50,0,1,1,1,1,0,0,1,0,1,1,1,1,1,1,1,0",
+    "1002,0,1,35,0,0,0,1,1,0,0,1,1,1,1,1,1,1,0,1,0",
+    "1003,0,0,545,0,1,0,0,1,0,1,1,1,0,1,1,0,1,1,1,0",
+    "1004,1,1,92,0,0,0,0,0,0,0,1,0,1,0,1,0,0,1,0,0",
+    "1005,0,0,489,0,0,0,0,0,0,1,0,1,1,0,1,0,0,0,0,0",
+    "1006,0,1,210,0,1,0,1,1,1,0,1,1,1,0,1,1,1,0,1,0",
+    "1007,1,0,172,0,1,1,1,0,1,1,1,1,1,1,1,1,1,0,0,0",
+    "1008,1,1,68,0,0,0,0,0,1,0,0,0,1,1,1,0,1,0,0,0",
+    "1009,0,0,690,0,0,0,1,1,1,0,1,1,0,0,1,1,1,0,0,0",
+    "1010,0,1,286,0,1,0,1,1,1,1,1,1,1,1,0,1,1,1,1,0"
+  ].join("\n");
+
+  const $ = (id) => document.getElementById(id);
+  const state = { records: [], results: [], modelVersion: "", modelReady: false };
+
+  // ---------- helpers ----------
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const pct = (p) => (p * 100).toFixed(1) + "%";
+  const count = (s, ch) => s.split(ch).length - 1;
+  const norm = (h) => h.trim().replace(/\s+/g, "_").toLowerCase();
+
+  function download(name, text) {
+    const url = URL.createObjectURL(new Blob([text], { type: "text/csv;charset=utf-8" }));
+    const a = Object.assign(document.createElement("a"), { href: url, download: name });
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function csvCell(v) {
+    const s = String(v ?? "");
+    return /[",;\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+
+  // Small CSV parser: quotes, CRLF, BOM, and comma / semicolon / tab detection
+  function parseCSV(text) {
+    text = text.replace(/^\uFEFF/, "");
+    const first = text.split(/\r?\n/, 1)[0] || "";
+    const delim = [",", ";", "\t"].reduce((a, b) => (count(first, b) > count(first, a) ? b : a));
+    const rows = []; let row = [], field = "", quoted = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (quoted) {
+        if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else quoted = false; }
+        else field += c;
+      } else if (c === '"') quoted = true;
+      else if (c === delim) { row.push(field); field = ""; }
+      else if (c === "\n" || c === "\r") {
+        if (c === "\r" && text[i + 1] === "\n") i++;
+        row.push(field); rows.push(row); row = []; field = "";
+      } else field += c;
+    }
+    if (field !== "" || row.length) { row.push(field); rows.push(row); }
+    return rows.filter((r) => r.some((v) => v.trim() !== ""));
+  }
+
+  // ---------- data loading ----------
+  function loadText(text, label) {
+    state.records = []; state.results = [];
+    $("resultsCard").classList.add("hidden");
+    hideError();
+
+    const rows = parseCSV(text);
+    if (rows.length < 2) return fail(`${label} has no data rows.`);
+
+    const header = rows[0], index = {}, ignored = [];
+    header.forEach((h, i) => {
+      const f = FIELDS.find((x) => x.toLowerCase() === norm(h));
+      if (f && !(f in index)) index[f] = i;
+      else if (h.trim()) ignored.push(h.trim());
+    });
+    const missing = FIELDS.filter((f) => !(f in index));
+
+    const checks = [];
+    checks.push(missing.length
+      ? ["err", `Missing ${missing.length} required column${missing.length > 1 ? "s" : ""}: ${missing.join(", ")}`]
+      : ["ok", `All 20 required columns found in <strong>${esc(label)}</strong>`]);
+    if (ignored.length) checks.push(["warn", `Ignored column${ignored.length > 1 ? "s" : ""}: ${esc(ignored.join(", "))}`]);
+
+    if (!missing.length) {
+      const issues = [];
+      rows.slice(1).forEach((r, k) => {
+        const line = k + 2, rec = {}; let err = null;
+        for (const f of FIELDS) {
+          const raw = (r[index[f]] ?? "").trim();
+          if (raw === "") { err = `${f} is empty`; break; }
+          if (f === "ID") { rec.ID = raw; continue; }
+          const n = Number(raw.replace(",", "."));
+          if (!Number.isFinite(n)) { err = `${f} is not a number`; break; }
+          if (f === "rx_ds") {
+            if (n < 0) { err = "rx_ds is negative"; break; }
+            rec.rx_ds = n;
+          } else {
+            if (!Number.isInteger(n)) { err = `${f} must be 0 or 1`; break; }
+            rec[f] = n;
+          }
+        }
+        if (err) issues.push(`row ${line} (${err})`); else state.records.push(rec);
+      });
+      checks.push(["ok", `${state.records.length} patient${state.records.length === 1 ? "" : "s"} ready to score`]);
+      if (issues.length) {
+        const shown = issues.slice(0, 5).join(", ") + (issues.length > 5 ? `, and ${issues.length - 5} more` : "");
+        checks.push(["warn", `${issues.length} row${issues.length > 1 ? "s" : ""} skipped: <span class="muted">${esc(shown)}</span>`]);
+      }
+    }
+
+    $("checks").innerHTML = checks.map(([t, msg]) =>
+      `<li><span class="ic ${t}">${t === "ok" ? "&#10003;" : t === "warn" ? "!" : "&times;"}</span><span>${msg}</span></li>`).join("");
+    $("checks").classList.remove("hidden");
+    updateScoreButton();
+  }
+
+  function fail(msg) { showError(msg); $("checks").classList.add("hidden"); updateScoreButton(); }
+  function showError(msg) { $("dataError").textContent = msg; $("dataError").classList.remove("hidden"); }
+  function hideError() { $("dataError").classList.add("hidden"); }
+
+  function updateScoreButton() {
+    const n = state.records.length;
+    $("scoreBtn").disabled = !n || !state.modelReady;
+    $("scoreHint").textContent = !n ? "Load data to continue"
+      : !state.modelReady ? "Waiting for the model to be ready"
+      : `${n} patient${n === 1 ? "" : "s"} will be sent to /predict`;
+  }
+
+  function readFile(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => loadText(String(reader.result), file.name);
+    reader.onerror = () => fail("Could not read the file.");
+    reader.readAsText(file);
+  }
+
+  // ---------- service health ----------
+  async function checkHealth(attempt = 0) {
+    try {
+      const r = await fetch("/health", { cache: "no-store" });
+      const body = await r.json();
+      const info = r.ok ? body : (body.detail || {});
+      state.modelReady = r.ok;
+      state.modelVersion = info.model_version || "";
+      const commit = (info.git_commit || "").slice(0, 7);
+      $("statusDot").className = "dot " + (r.ok ? "ok" : "bad");
+      $("statusText").innerHTML = r.ok
+        ? `Model ready<span class="long"> &middot; ${esc(state.modelVersion)}${commit && commit !== "local" ? " &middot; " + esc(commit) : ""}</span>`
+        : "Model not loaded";
+    } catch (e) {
+      state.modelReady = false;
+      $("statusDot").className = "dot bad";
+      $("statusText").textContent = attempt < 6 ? "Waking up service" : "Service unreachable";
+      if (attempt < 6) setTimeout(() => checkHealth(attempt + 1), 5000);
+    }
+    updateScoreButton();
+  }
+
+  // ---------- scoring ----------
+  async function score() {
+    const btn = $("scoreBtn");
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Scoring';
+    hideError();
+    try {
+      const preds = [];
+      for (let i = 0; i < state.records.length; i += CHUNK) {
+        const r = await fetch("/predict", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ records: state.records.slice(i, i + CHUNK) })
+        });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          const d = body.detail;
+          const msg = typeof d === "string" ? d : Array.isArray(d) ? d.slice(0, 3).map((x) => `${(x.loc || []).join(".")}: ${x.msg}`).join("; ") : `HTTP ${r.status}`;
+          throw new Error(msg);
+        }
+        state.modelVersion = body.model_version || state.modelVersion;
+        preds.push(...body.predictions);
+      }
+      const byId = new Map(state.records.map((rec) => [rec.ID, rec]));
+      state.results = preds.map((p) => {
+        const rec = byId.get(p.ID) || {};
+        return { ...p, rx_ds: rec.rx_ds, flags: FLAGS.reduce((s, f) => s + (rec[f] ? 1 : 0), 0) };
+      }).sort((a, b) => (b.probability ?? b.prediction) - (a.probability ?? a.prediction));
+      state.sent = state.records.length;
+      renderResults();
+    } catch (e) {
+      showError(`Scoring failed: ${e.message}`);
+    } finally {
+      btn.textContent = "Score patients";
+      updateScoreButton();
+    }
+  }
+
+  function renderResults() {
+    const res = state.results;
+    const flagged = res.filter((r) => r.prediction === 1).length;
+    const probs = res.map((r) => r.probability).filter((p) => p != null).sort((a, b) => a - b);
+    const mid = probs.length ? (probs.length % 2 ? probs[(probs.length - 1) / 2] : (probs[probs.length / 2 - 1] + probs[probs.length / 2]) / 2) : null;
+
+    $("mScored").textContent = res.length;
+    $("mFlagged").innerHTML = `${flagged}<small>${res.length ? Math.round(100 * flagged / res.length) : 0}%</small>`;
+    $("mMedian").textContent = mid == null ? "n/a" : pct(mid);
+    const dropped = state.sent - res.length;
+    $("resultsSub").textContent = `Sorted from highest to lowest risk. Model version: ${state.modelVersion || "unknown"}.` +
+      (dropped > 0 ? ` ${dropped} duplicate row${dropped > 1 ? "s were" : " was"} removed by the cleaning step.` : "");
+
+    const rows = $("onlyFlagged").checked ? res.filter((r) => r.prediction === 1) : res;
+    $("tbody").innerHTML = rows.length ? rows.map((r) => {
+      const hi = r.prediction === 1, p = r.probability;
+      return `<tr>
+        <td class="rank">${res.indexOf(r) + 1}</td>
+        <td>${esc(r.ID)}</td>
+        <td>${p == null ? "n/a" : `<div class="prob"><div class="track"><div class="fill${hi ? " hi" : ""}" style="width:${(p * 100).toFixed(1)}%"></div></div><span>${pct(p)}</span></div>`}</td>
+        <td><span class="pill ${hi ? "hi" : "lo"}">${hi ? "Prioritise" : "Routine"}</span></td>
+        <td class="num">${r.rx_ds ?? ""}</td>
+        <td class="num">${r.flags} / ${FLAGS.length}</td>
+      </tr>`;
+    }).join("") : `<tr><td colspan="6" class="empty">No patients flagged by the model.</td></tr>`;
+
+    $("resultsCard").classList.remove("hidden");
+    $("resultsCard").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  // ---------- events ----------
+  $("file").addEventListener("change", (e) => readFile(e.target.files[0]));
+  const drop = $("drop");
+  ["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+  ["dragleave", "drop"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
+  drop.addEventListener("drop", (e) => readFile(e.dataTransfer.files[0]));
+  $("sampleBtn").addEventListener("click", () => loadText(SAMPLE, "sample data"));
+  $("templateBtn").addEventListener("click", () =>
+    download("patient_template.csv", FIELDS.join(",") + "\nP001,12,1,0,1,0,1,0,0,1,0,0,1,0,0,1,0,1,1,0\n"));
+  $("scoreBtn").addEventListener("click", score);
+  $("onlyFlagged").addEventListener("change", renderResults);
+  $("downloadBtn").addEventListener("click", () => {
+    const head = ["rank", "ID", "probability", "prediction", "model_version"];
+    const lines = state.results.map((r, i) => [i + 1, r.ID, r.probability ?? "", r.prediction, state.modelVersion].map(csvCell).join(","));
+    download("risk_scores.csv", [head.join(","), ...lines].join("\n") + "\n");
+  });
+
+  checkHealth();
+})();
+</script>
+</body>
+</html>

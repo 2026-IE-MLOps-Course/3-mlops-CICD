@@ -29,6 +29,7 @@ import pandas as pd
 import wandb
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict
 
 from src.clean_data import clean_dataframe
@@ -40,6 +41,8 @@ from src.validate import validate_dataframe
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# Browser interface for quick manual testing (shipped inside src/, so Docker copies it)
+UI_PAGE = Path(__file__).resolve().parent / "static" / "index.html"
 
 # Secrets and deployment switches come from environment variables (.env locally, Render settings in the cloud)
 load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
@@ -239,7 +242,19 @@ def _flush_buffer(cfg: Dict[str, Any], force: bool = False,
 # -------------------------------------------------------------------
 @app.get("/")
 def root() -> Dict[str, str]:
-    return {"message": "Use /health or /docs to test the API"}
+    return {"message": "Open /ui for the web interface, or use /health and /docs to test the API"}
+
+
+@app.get("/ui", response_class=HTMLResponse, include_in_schema=False)
+def ui() -> HTMLResponse:
+    """
+    Minimal web interface: upload a CSV, call /predict, see and download the risk scores
+    - Static page served by this same app, so no extra service and no CORS setup
+    - No ML logic in the page: it only reshapes CSV rows into the PatientRecord contract
+    """
+    if not UI_PAGE.exists():
+        raise HTTPException(status_code=404, detail="Web interface not found (src/static/index.html)")
+    return HTMLResponse(UI_PAGE.read_text(encoding="utf-8"))
 
 
 @app.get("/health", response_model=HealthResponse)
