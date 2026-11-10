@@ -29,9 +29,14 @@ def clean_dataframe(df_raw: pd.DataFrame, target_column: Optional[str] = None) -
     - Drop rows with missing target
 
     Inference mode (target_column None)
-    - Standardize headers
-    - Drop exact duplicates
-    - Do not require or drop based on target
+    - Standardize headers only
+    - Never drop rows: every input row must get exactly one prediction
+
+    Where each preparation step belongs
+    - Stateless rules for every row (headers, formats): here, shared by main.py and api.py
+    - Row filters (duplicates, missing target): here, training mode only
+    - Anything that learns from data (imputation, binning, scaling, encoding): src/features.py,
+      inside the fitted pipeline saved in model.joblib
     """
     logger.info("Cleaning dataframe")
 
@@ -54,12 +59,12 @@ def clean_dataframe(df_raw: pd.DataFrame, target_column: Optional[str] = None) -
         .str.replace(" ", "_", regex=False)
     )
 
-    # Teaching note
-    # This drops exact duplicates across all columns (including ID if present)
-    # If ID is always unique, duplicates will not be removed, which is expected
-    df_clean = df_clean.drop_duplicates()
-
     if target_column is not None:
+        # Row filters are training only: dropping rows at inference would silently lose predictions
+        # This drops exact duplicates across all columns (including ID if present)
+        # If ID is always unique, duplicates will not be removed, which is expected
+        df_clean = df_clean.drop_duplicates()
+
         # Standardize target name to match standardized headers
         target_column_std = (
             (target_column or "")

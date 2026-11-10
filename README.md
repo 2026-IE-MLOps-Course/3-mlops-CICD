@@ -92,7 +92,7 @@ load -> clean -> validate -> split -> feature recipe -> train -> calibrate
 |---|---|
 | `src/config.py` | Read and check `config.yaml` (shared by pipeline, API and notebook) |
 | `src/load_data.py` | Load raw CSV, fail fast if missing or empty |
-| `src/clean_data.py` | Stateless cleaning (column names, duplicates, missing target) |
+| `src/clean_data.py` | Stateless cleaning (column names). Training only: drop duplicates and missing target |
 | `src/validate.py` | Data quality gate (schema, target values, business rules) |
 | `src/features.py` | Unfitted feature recipe (`ColumnTransformer`) |
 | `src/train.py` | Fit the pipeline on the train split only, optional calibration |
@@ -108,6 +108,19 @@ load -> clean -> validate -> split -> feature recipe -> train -> calibrate
 - **Split before fit:** every step that learns numbers (imputers, bins, scaler, model) is fitted on the train split only
 - **Validation for decisions, test for the audit:** the quality gate uses validation, the test split is reported once
 - **One artifact:** preprocessing and model are saved together, so training and serving cannot drift apart
+
+### Where each preparation step runs
+
+One question decides it: does the step learn anything from the data?
+
+| Step type | Examples | Where it runs | Training | Inference |
+|---|---|---|---|---|
+| Stateless rule for every row | Rename headers, align types, units and text case | `clean_dataframe()` in `src/clean_data.py`, called by `main.py` and `api.py` | Yes | Yes |
+| Row filter | Drop duplicates, drop rows with a missing target, fix wrong labels | `clean_dataframe(target_column=...)` | Yes | Never: every input row gets a prediction |
+| Check, not a transform | Required columns, non-negative `rx_ds` | `src/validate.py` | Yes | Yes |
+| Learns from data (stateful) | Impute, quantile bins, scale, one-hot encode, derived `binary_sum`, model | `src/features.py` + `src/train.py`, saved together in `models/model.joblib` | Fit on the train split | Replayed from the file, never refitted |
+
+The pipeline artifact keeps the fitted values the same. Shared functions keep the stateless rules the same. Docker and `conda-lock.yml` keep the library versions the same, so the file loads and behaves as it did in training. You need all three.
 - **Config, not code:** paths, features, thresholds and hyperparameters live in `config.yaml`
 - **Secrets never in Git:** `.env` locally, Render environment variables and GitHub Secrets in the cloud
 
@@ -298,6 +311,11 @@ Generated and ignored by Git: `models/`, `reports/`, `logs/`, `wandb/`, `artifac
 ## 12. Changelog
 
 Format: [Keep a Changelog](https://keepachangelog.com), versions follow [Semantic Versioning](https://semver.org).
+
+### [2.1.1] - 2026-11-10
+
+- Fixed: inference no longer drops duplicate rows, so every input row gets a prediction
+- Added a training-serving symmetry test (API and batch path return the same probability) and the README table on where each preparation step runs
 
 ### [2.1.0] - 2026-10-22
 

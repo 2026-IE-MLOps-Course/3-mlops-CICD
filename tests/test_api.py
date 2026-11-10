@@ -112,3 +112,20 @@ def test_predict_returns_503_without_model():
         app.state.model_pipeline = None
         response = client.post("/predict", json={"records": [VALID_RECORD]})
         assert response.status_code == 503
+
+
+def test_predict_matches_batch_path_and_keeps_duplicates(client_with_model, tiny_model):
+    # Training-serving symmetry: the API and the batch path (clean -> infer) give the same probability
+    from src.clean_data import clean_dataframe
+    from src.infer import run_inference
+
+    records = [VALID_RECORD, VALID_RECORD]
+    response = client_with_model.post("/predict", json={"records": records})
+    assert response.status_code == 200
+    api_probas = [p["probability"] for p in response.json()["predictions"]]
+
+    df_batch = clean_dataframe(pd.DataFrame(records), target_column=None)
+    batch = run_inference(tiny_model, df_batch.drop(columns=["ID"]), include_proba=True)
+
+    assert len(api_probas) == len(records)
+    assert api_probas == pytest.approx(batch["proba"].tolist())

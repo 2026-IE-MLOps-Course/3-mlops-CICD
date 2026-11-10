@@ -52,3 +52,13 @@ def test_clean_dataframe_inference_mode_does_not_require_target():
     assert "ID" in df_clean.columns
     assert "OD" not in df_clean.columns
     assert len(df_clean) == 2
+
+
+def test_clean_dataframe_inference_mode_keeps_every_row():
+    # Inference must return one prediction per input row, so duplicates are never dropped
+    df_infer = pd.DataFrame({"ID": [1, 1, 2], "rx ds": [10, 10, pd.NA]})
+
+    df_clean = clean_dataframe(df_infer, target_column=None)
+
+    assert len(df_clean) == len(df_infer)
+    assert "rx_ds" in df_clean.columns
