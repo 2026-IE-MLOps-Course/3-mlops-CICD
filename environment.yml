@@ -26,6 +26,8 @@ dependencies:
   - jupyter
   - ipykernel
   - matplotlib
+  # Data and pipeline versioning: dvc.yaml and dvc.lock
+  - dvc=3.67.1
   # Quality: tests, coverage, style
   - pytest
   - pytest-cov

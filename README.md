@@ -212,15 +212,31 @@ feature/* --PR--> dev --PR--> main --(human publishes a GitHub Release)--> deplo
               CI          CI                                              CI again + smoke test
 ```
 
+### Data and pipeline versioning: `dvc.yaml` and `dvc.lock`
+
+`dvc.yaml` declares the whole pipeline as one stage: its inputs (`src/`, `config.yaml`, the raw and inference CSV files) and its outputs (`clean.csv`, `model.joblib`, `predictions.csv`). `dvc.lock` records the md5 of each one. Commit `dvc.lock` with every change to data, settings or code, and any commit tells you exactly which data its model came from. The data are small and synthetic, so they stay in Git and no DVC remote is needed
+
+```bash
+dvc repro      # rerun only if an input changed, then update dvc.lock
+dvc status     # which input changed since dvc.lock was written
+dvc dag        # draw the stages
+git add dvc.lock && git commit -m "Record pipeline run"
+```
+
+First time: install DVC (`pip install "dvc==3.67.1"`, also listed in `environment.yml`), run `dvc repro` and commit the new `dvc.lock`. After the next change to `environment.yml`, regenerate `conda-lock.yml` so it includes DVC
+
 ### Continuous Integration: `.github/workflows/ci.yml`
 
 Runs on every Pull Request to `dev` or `main` and on every push to `main`:
 
 1. **Lint:** `flake8` (fails in seconds)
-2. **Environment:** rebuild from `conda-lock.yml`
-3. **Pipeline:** `python -m src.main` with W&B disabled. The model quality gate runs here
+2. **Environment:** rebuild from `conda-lock.yml`, with the downloaded packages cached (new cache key when `conda-lock.yml` changes)
+3. **Pipeline:** `dvc repro` runs `python -m src.main` with W&B disabled. The model quality gate runs here, and its result is written to the run summary
 4. **Tests:** `pytest` with coverage, minimum 75%
-5. **Docker:** the image must build
+5. **Evidence:** `logs/pipeline.log`, `reports/predictions.csv`, `coverage.xml` and the `dvc.lock` written by the run are kept for 30 days as the artifact `pipeline-evidence-<commit>`, pass or fail
+6. **Docker:** the image must build
+
+The workflow token can only read the repository (`permissions: contents: read`), and a new push to a Pull Request cancels its previous run
 
 ### Continuous Deployment: `.github/workflows/deploy.yml`
 
@@ -229,6 +245,7 @@ Runs only when a person publishes a GitHub Release (or runs it manually):
 1. Reruns the full CI on the released commit
 2. Calls the Render deploy hook for that exact commit
 3. Runs `scripts/smoke_test.py` until `/health` reports the new commit, then calls `/predict`
+4. In parallel, builds the serving image once and publishes it to GitHub Container Registry as `ghcr.io/<owner>/<repo>` with the tags `X.Y.Z`, `X.Y`, `latest` and `sha-<commit>`, using the built-in `GITHUB_TOKEN` (no extra secret). Render still builds from the tagged commit; the published image is the versioned, traceable record of what each release contains, and can be run anywhere with `docker run -p 8000:8000 ghcr.io/<owner>/<repo>:X.Y.Z`
 
 ### One-time setup
 
@@ -311,6 +328,13 @@ Generated and ignored by Git: `models/`, `reports/`, `logs/`, `wandb/`, `artifac
 ## 12. Changelog
 
 Format: [Keep a Changelog](https://keepachangelog.com), versions follow [Semantic Versioning](https://semver.org).
+
+### [2.2.0] - 2026-11-13
+
+- CI: cached conda packages keyed on `conda-lock.yml`, read-only token, cancel superseded Pull Request runs, quality gate result in the run summary, and a `pipeline-evidence-<commit>` artifact (pipeline log, predictions, coverage) kept 30 days
+- DVC: `dvc.yaml` runs the whole pipeline as one stage; `dvc.lock` records the md5 of the data, `config.yaml`, `src/` and every output, so each commit names its exact data. No remote: the synthetic data stays in Git. CI runs `dvc repro`
+- CD: every published release also pushes a versioned serving image to GitHub Container Registry
+- Actions updated to their Node 24 majors: `actions/checkout@v6`, `actions/setup-python@v6`
 
 ### [2.1.1] - 2026-11-10
 

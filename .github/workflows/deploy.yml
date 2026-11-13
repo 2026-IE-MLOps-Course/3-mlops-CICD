@@ -3,6 +3,8 @@
 #   1. rerun the full CI on the released commit
 #   2. ask Render to deploy exactly that commit (deploy hook + ?ref=<sha>)
 #   3. smoke test: wait until /health reports the new commit, then call /predict
+#   4. in parallel, publish the serving image to GitHub Container Registry (ghcr.io)
+#      tagged with the release version and the commit, as a traceable release artifact
 # Rollback: Actions > "CD - Deploy to Render" > Run workflow > type an older tag
 #
 # One-time setup (see README section 9)
@@ -20,6 +22,11 @@ on:
                 description: "Release tag to deploy (an older tag rolls back)"
                 required: true
 
+# Least privilege; packages: write lets the built-in GITHUB_TOKEN push the image
+permissions:
+    contents: read
+    packages: write
+
 # Never run two deploys at the same time
 concurrency:
     group: deploy-production
@@ -30,6 +37,43 @@ jobs:
         uses: ./.github/workflows/ci.yml
         with:
             ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+    # Releases only: a manual rollback redeploys an old tag and needs no new image
+    publish-image:
+        needs: ci
+        if: github.event_name == 'release'
+        runs-on: ubuntu-latest
+        timeout-minutes: 30
+        steps:
+            - name: Checkout the release
+              uses: actions/checkout@v6
+              with:
+                  ref: ${{ github.event.release.tag_name }}
+
+            - name: Image tags from the release (2.2.0, 2.2, latest, sha-abc1234)
+              id: meta
+              uses: docker/metadata-action@v6
+              with:
+                  images: ghcr.io/${{ github.repository }}
+                  tags: |
+                      type=semver,pattern={{version}},value=${{ github.event.release.tag_name }}
+                      type=semver,pattern={{major}}.{{minor}},value=${{ github.event.release.tag_name }}
+                      type=sha
+
+            - name: Log in to GitHub Container Registry
+              uses: docker/login-action@v4
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Build and push the serving image
+              uses: docker/build-push-action@v7
+              with:
+                  context: .
+                  push: true
+                  tags: ${{ steps.meta.outputs.tags }}
+                  labels: ${{ steps.meta.outputs.labels }}
 
     deploy:
         needs: ci
@@ -48,7 +92,7 @@ jobs:
                   exit $missing
 
             - name: Checkout the release
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
               with:
                   ref: ${{ github.event.release.tag_name || inputs.tag }}
 
@@ -63,7 +107,7 @@ jobs:
                   curl --fail --silent --show-error -X POST "${HOOK}&ref=${{ steps.commit.outputs.sha }}"
 
             - name: Set up Python
-              uses: actions/setup-python@v5
+              uses: actions/setup-python@v6
               with:
                   python-version: "3.12"
 

@@ -1,0 +1,23 @@
+# dvc.yaml: the whole pipeline as one DVC stage
+# Git keeps this file and dvc.lock; dvc.lock records the md5 of every input and output,
+# so every commit names the exact data, settings and code its model came from
+#   dvc repro    rerun the pipeline only if a dependency changed, then update dvc.lock
+#   dvc status   show which dependency changed since dvc.lock was written
+#   dvc dag      draw the stages
+# The data stays in Git (small synthetic teaching files), so no DVC remote is needed
+stages:
+  pipeline:
+    cmd: python -m src.main
+    deps:
+      - src
+      - config.yaml
+      - data/raw/opioid_raw_data.csv
+      - data/inference/opioid_infer_01.csv
+    outs:
+      # cache: false: Git ignores these files and DVC only records their hashes
+      - data/processed/clean.csv:
+          cache: false
+      - models/model.joblib:
+          cache: false
+      - reports/predictions.csv:
+          cache: false
