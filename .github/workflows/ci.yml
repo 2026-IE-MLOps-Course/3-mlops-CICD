@@ -90,6 +90,19 @@ jobs:
                   conda activate mlops
                   pip install "dvc==3.67.1"
 
+            # Pull requests from forks receive no secrets; use internal branches (dev, feature/*)
+            - name: Pull the data version recorded in Git (DagsHub)
+              shell: bash -el {0}
+              env:
+                  DAGSHUB_USER: ${{ vars.DAGSHUB_USER }}
+                  DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
+              run: |
+                  conda activate mlops
+                  dvc remote modify dagshub --local auth basic
+                  dvc remote modify dagshub --local user "$DAGSHUB_USER"
+                  dvc remote modify dagshub --local password "$DAGSHUB_TOKEN"
+                  dvc pull
+
             - name: Run the full pipeline with DVC (the model quality gate runs here)
               shell: bash -el {0}
               run: |
@@ -122,6 +135,13 @@ jobs:
                       dvc.lock
                   retention-days: 30
                   if-no-files-found: warn
+
+            - name: Upload the gated model for container packaging
+              uses: actions/upload-artifact@v7
+              with:
+                  name: gated-model
+                  path: models/model.joblib
+                  retention-days: 30
 
             - name: Docker image must build
               run: docker build -t mlops-api:ci .

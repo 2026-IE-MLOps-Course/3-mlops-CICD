@@ -50,6 +50,12 @@ jobs:
               with:
                   ref: ${{ github.event.release.tag_name }}
 
+            - name: Download the gated model from CI
+              uses: actions/download-artifact@v7
+              with:
+                  name: gated-model
+                  path: models
+
             - name: Image tags from the release (2.2.0, 2.2, latest, sha-abc1234)
               id: meta
               uses: docker/metadata-action@v6

@@ -49,24 +49,30 @@ Why PR AUC: only about 18% of patients are positive. Accuracy would look good fo
 conda env create -f environment.yml
 conda activate mlops
 
-# 2. Add your secrets (never commit .env)
+# 2. Authenticate DVC with DagsHub (token from DagsHub > Settings > Tokens; never put it in .env or Git) and pull data
+dvc remote modify dagshub --local auth basic
+dvc remote modify dagshub --local user <your-dagshub-user>
+dvc remote modify dagshub --local password <your-dagshub-token>
+dvc pull
+
+# 3. Add your secrets (never commit .env)
 cp .env.example .env            # then edit .env
 
-# 3. Check the code
+# 4. Check the code
 flake8
 pytest
 
-# 4. Run the full pipeline: train, quality gate, test audit, save, batch inference
+# 5. Run the full pipeline: train, quality gate, test audit, save, batch inference
 python -m src.main
 
-# 5. Serve the model locally and test it
+# 6. Serve the model locally and test it
 uvicorn src.api:app --reload
 python scripts/smoke_test.py --url http://127.0.0.1:8000
 ```
 
 > **Windows:** always run inside the activated environment (`conda activate mlops`, then `python -m src.main`), or use `conda run -n mlops python -m src.main`. Calling the environment's `python.exe` directly, for example from a VS Code interpreter that did not activate the environment, can crash with `0xC06D007F` during model calibration because Windows cannot find the environment's maths libraries.
 
-Outputs of step 4:
+Outputs of step 5:
 
 - `data/processed/clean.csv` cleaned training data
 - `models/model.joblib` the deployable pipeline (preprocessing + model in one file)
@@ -165,7 +171,7 @@ To promote a model to production:
 2. Select the version you want and add the alias `prod`
 3. Set `MODEL_SOURCE=wandb` (locally in `.env`, on Render in Environment). The API downloads the `prod` model at startup
 
-Rollback of the model only: move the `prod` alias back to the previous version and restart the Render service.
+Rollback of the model only: move the `prod` alias back to the previous version and restart the Render service. Rolling back the code does not roll back the `prod` model alias; move the alias back in W&B.
 
 ---
 
@@ -212,18 +218,20 @@ feature/* --PR--> dev --PR--> main --(human publishes a GitHub Release)--> deplo
               CI          CI                                              CI again + smoke test
 ```
 
-### Data and pipeline versioning: `dvc.yaml` and `dvc.lock`
+### Data and pipeline versioning: DagsHub, `.dvc` pointers, `dvc.yaml` and `dvc.lock`
 
-`dvc.yaml` declares the whole pipeline as one stage: its inputs (`src/`, `config.yaml`, the raw and inference CSV files) and its outputs (`clean.csv`, `model.joblib`, `predictions.csv`). `dvc.lock` records the md5 of each one. Commit `dvc.lock` with every change to data, settings or code, and any commit tells you exactly which data its model came from. The data are small and synthetic, so they stay in Git and no DVC remote is needed
+The raw and inference CSV files live on DagsHub (`https://dagshub.com/phidesigner/3-mlops-CICD.dvc`), while Git stores their `.dvc` pointer files (`data/raw/opioid_raw_data.csv.dvc` and `data/inference/opioid_infer_01.csv.dvc`). `dvc.yaml` declares the whole pipeline as one stage: its inputs (`src/`, `config.yaml`, the raw and inference CSV files) and its outputs (`clean.csv`, `model.joblib`, `predictions.csv`). `dvc.lock` records the md5 of each one. Commit `.dvc` pointers and `dvc.lock` with every change to data, settings or code, and any commit tells you exactly which data its model came from.
 
 ```bash
+dvc pull       # download the exact data versions recorded in this commit
 dvc repro      # rerun only if an input changed, then update dvc.lock
 dvc status     # which input changed since dvc.lock was written
+dvc push       # upload any new data version to DagsHub
 dvc dag        # draw the stages
-git add dvc.lock && git commit -m "Record pipeline run"
+git add data/raw/opioid_raw_data.csv.dvc data/inference/opioid_infer_01.csv.dvc dvc.lock && git commit -m "Record pipeline run"
 ```
 
-First time: install DVC (`pip install "dvc==3.67.1"`, also listed in `environment.yml`), run `dvc repro` and commit the new `dvc.lock`. After the next change to `environment.yml`, regenerate `conda-lock.yml` so it includes DVC
+First time: install DVC (`pip install "dvc==3.67.1"`, also listed in `environment.yml`), configure your DagsHub credentials locally with `dvc remote modify dagshub --local ...` (written to `.dvc/config.local`, ignored by Git), and run `dvc pull` then `dvc repro`. After the next change to `environment.yml`, regenerate `conda-lock.yml` so it includes DVC.
 
 ### Continuous Integration: `.github/workflows/ci.yml`
 
@@ -258,6 +266,8 @@ Runs only when a person publishes a GitHub Release (or runs it manually):
 
 **GitHub** (Settings > Secrets and variables > Actions):
 
+- Secret `DAGSHUB_TOKEN` = your DagsHub token (so CI can run `dvc pull`; pull requests from forks receive no secrets, so use internal branches `dev` and `feature/*`)
+- Variable `DAGSHUB_USER` = your DagsHub username (for example `phidesigner`)
 - Secret `RENDER_DEPLOY_HOOK_URL` = the deploy hook URL (treat it like a password)
 - Variable `RENDER_SERVICE_URL` = `https://<your-service>.onrender.com`
 
@@ -273,7 +283,7 @@ Runs only when a person publishes a GitHub Release (or runs it manually):
 3. GitHub > Releases > Draft a new release > tag `v2.1.0` from `main` > Publish
 4. Watch Actions > "CD - Deploy to Render"
 
-**Rollback:** Actions > "CD - Deploy to Render" > Run workflow > pick the previous tag.
+**Rollback:** Actions > "CD - Deploy to Render" > Run workflow > pick the previous tag. Rolling back the code does not roll back the `prod` model alias; move the alias back in W&B.
 
 Free Render services sleep after inactivity. The first request can take about a minute.
 
@@ -295,7 +305,7 @@ Free Render services sleep after inactivity. The first request can take about a 
 ├── Dockerfile / .dockerignore     # lean serving image
 ├── .flake8 / pytest.ini           # quality tool settings
 ├── data/
-│   ├── raw/opioid_raw_data.csv    # synthetic teaching data (committed on purpose)
+│   ├── raw/opioid_raw_data.csv    # pulled from DagsHub with dvc pull (.dvc pointer in Git)
 │   └── inference/opioid_infer_01.csv
 ├── notebooks/                     # exploration only, imports from src/
 ├── scripts/
@@ -332,7 +342,7 @@ Format: [Keep a Changelog](https://keepachangelog.com), versions follow [Semanti
 ### [2.2.0] - 2026-11-13
 
 - CI: cached conda packages keyed on `conda-lock.yml`, read-only token, cancel superseded Pull Request runs, quality gate result in the run summary, and a `pipeline-evidence-<commit>` artifact (pipeline log, predictions, coverage) kept 30 days
-- DVC: `dvc.yaml` runs the whole pipeline as one stage; `dvc.lock` records the md5 of the data, `config.yaml`, `src/` and every output, so each commit names its exact data. No remote: the synthetic data stays in Git. CI runs `dvc repro`
+- DVC: moved `data/raw/opioid_raw_data.csv` and `data/inference/opioid_infer_01.csv` out of Git into DagsHub (`https://dagshub.com/phidesigner/3-mlops-CICD.dvc`) via `.dvc` pointer files; `dvc.yaml` runs the whole pipeline as one stage and `dvc.lock` records the md5 of the data, `config.yaml`, `src/` and every output. CI runs `dvc pull` then `dvc repro` and uploads `models/model.joblib` as the `gated-model` artifact for CD container packaging
 - CD: every published release also pushes a versioned serving image to GitHub Container Registry
 - Actions updated to their Node 24 majors: `actions/checkout@v6`, `actions/setup-python@v6`
 

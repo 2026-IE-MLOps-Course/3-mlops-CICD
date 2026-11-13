@@ -1,0 +1,35 @@
+schema: '2.0'
+stages:
+  pipeline:
+    cmd: python -m src.main
+    deps:
+    - path: config.yaml
+      hash: md5
+      md5: 4fdfcb8799506e7c757843bd846f2a51
+      size: 3653
+    - path: data/inference/opioid_infer_01.csv
+      hash: md5
+      md5: 636b0cc765ba6425ca1285a5971ce227
+      size: 531
+    - path: data/raw/opioid_raw_data.csv
+      hash: md5
+      md5: 23a3e3e8771f9a0b190b4ceaada7acd4
+      size: 48592
+    - path: src
+      hash: md5
+      md5: 8c8272c59abc02cfff2838a4be3f9b38.dir
+      size: 103960
+      nfiles: 15
+    outs:
+    - path: data/processed/clean.csv
+      hash: md5
+      md5: ca30bc21238bc2f33322627e7be2bee0
+      size: 48592
+    - path: models/model.joblib
+      hash: md5
+      md5: d451d9973827e643f46b4645fe072b0f
+      size: 21892
+    - path: reports/predictions.csv
+      hash: md5
+      md5: 54967de84eb7d17b013c6d296505e1f9
+      size: 299

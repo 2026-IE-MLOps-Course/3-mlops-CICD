@@ -1,0 +1,4 @@
+[core]
+    remote = dagshub
+['remote "dagshub"']
+    url = https://dagshub.com/phidesigner/3-mlops-CICD.dvc

@@ -4,7 +4,7 @@
 #   dvc repro    rerun the pipeline only if a dependency changed, then update dvc.lock
 #   dvc status   show which dependency changed since dvc.lock was written
 #   dvc dag      draw the stages
-# The data stays in Git (small synthetic teaching files), so no DVC remote is needed
+# The raw and inference CSVs live on DagsHub (.dvc pointers in Git); run dvc pull before dvc repro
 stages:
   pipeline:
     cmd: python -m src.main
