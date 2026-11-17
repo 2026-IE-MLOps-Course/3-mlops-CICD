@@ -101,7 +101,15 @@ def test_unit_run_lineage_links_commit_and_data(tmp_path: Path):
     lineage = tracking.run_lineage({"paths": {"raw_data": "raw.csv"}}, repo_root=tmp_path)
     assert lineage["raw_data_md5"] == "f00d"
     assert tracking.run_lineage({}, repo_root=tmp_path)["raw_data_md5"] == "unknown"
-    assert len(tracking.git_commit()) == 40  # this test suite runs inside the Git checkout
+
+
+def test_unit_git_commit_reads_head_with_git(monkeypatch):
+    def _fake_git(cmd, **kwargs):
+        assert cmd == ["git", "rev-parse", "HEAD"]
+        return subprocess.CompletedProcess(cmd, 0, stdout="abc123\n", stderr="")
+
+    monkeypatch.setattr(tracking.subprocess, "run", _fake_git)
+    assert tracking.git_commit() == "abc123"
 
 
 def test_unit_start_run_requires_a_project(fake_wandb):
@@ -111,7 +119,7 @@ def test_unit_start_run_requires_a_project(fake_wandb):
 
 def test_integration_start_run_records_config_lineage_and_options(fake_wandb):
     cfg = {"wandb": {"enabled": True, "project": "p", "name": " ", "tags": ["a", "", None]},
-           "paths": {"raw_data": "data/raw/opioid_raw_data.csv"}}
+           "paths": {"raw_data": "raw.csv"}}
     run = tracking.start_run(cfg)
     assert isinstance(run, FakeRun)
     assert fake_wandb["project"] == "p" and fake_wandb["name"] is None

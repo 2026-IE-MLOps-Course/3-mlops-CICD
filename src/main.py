@@ -180,15 +180,15 @@ def read_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
 # -----------------------------
 # Pipeline steps (each one calls the module that owns the logic)
 # -----------------------------
-def prepare_training_data(cfg: Dict[str, Any], s: Dict[str, Any], run: Any) -> SplitResult:
+def load_and_clean(s: Dict[str, Any], run: Any) -> pd.DataFrame:
     """
-    Load -> clean -> save processed -> validate -> split
+    Load -> clean -> save processed data
 
     Inputs
-    - cfg: full config, s: settings from read_settings, run: W&B run or None
+    - s: settings from read_settings, run: W&B run or None
 
     Outputs
-    - X_train, X_val, X_test, y_train, y_val, y_test (identifier column removed from X)
+    - df_clean: the training data after the stateless cleaning rules (also saved to paths.processed_data)
     """
     logger.info("1) LOAD raw data")
     df_raw = load_raw_data(s["raw"])
@@ -200,25 +200,7 @@ def prepare_training_data(cfg: Dict[str, Any], s: Dict[str, Any], run: Any) -> S
 
     logger.info("3) SAVE processed data")
     save_csv(df_clean, s["processed"])
-
-    logger.info("4) VALIDATE training data")
-    is_classification = s["problem_type"] == "classification"
-    validate_dataframe(
-        df=df_clean, required_columns=[s["target"]] + s["feature_cols"], target_column=s["target"],
-        check_missing_values=s["check_missing"], target_allowed_values=[0, 1] if is_classification else None,
-        numeric_non_negative_cols=s["non_negative_cols"],
-    )
-
-    logger.info("5) SPLIT train/val/test")
-    # The identifier is kept for traceability but never used as a feature
-    X = df_clean.drop(columns=[s["target"], s["id_col"]], errors="ignore")
-    split_cfg = require_section(cfg, "split")
-    parts = split_data(
-        X, df_clean[s["target"]], require_float(split_cfg, "test_size"), require_float(split_cfg, "val_size"),
-        require_int(split_cfg, "random_state"), is_classification,
-    )
-    logger.info("Split sizes | train=%s | val=%s | test=%s", parts[0].shape, parts[1].shape, parts[2].shape)
-    return parts
+    return df_clean
 
 
 def build_candidates(cfg: Dict[str, Any], s: Dict[str, Any], X_train: pd.DataFrame,
@@ -289,24 +271,20 @@ def evaluate_candidates(cfg: Dict[str, Any], s: Dict[str, Any], candidates: List
     return {k: v for k, v in comparison[-1].items() if k != "stage"}
 
 
-def apply_quality_gate(gate_cfg: Dict[str, Any], val_metrics: Dict[str, float]) -> None:
+def audit_on_test(s: Dict[str, Any], model: Any, X_test: pd.DataFrame, y_test: pd.Series, run: Any) -> None:
     """
     Inputs
-    - gate_cfg: evaluation.quality_gate from config.yaml
-    - val_metrics: validation metrics of the model we intend to ship
+    - s: settings; model: the gated model; X_test, y_test: the untouched test split; run: W&B run or None
 
     Outputs
-    - None. Raises ValueError (from check_quality_gate) when the model is not good enough
-
-    Why it matters
-    - Fail fast: a weak model is never saved, registered in W&B or deployed
+    - None. Logs the test metrics once when evaluation.evaluate_on_test is true (report only, never tune on it)
     """
-    if not bool(gate_cfg.get("enabled", False)):
-        logger.warning("9) QUALITY GATE disabled in config.yaml, any model will be saved")
+    if not s["evaluate_on_test"]:
         return
-    logger.info("9) QUALITY GATE on validation metrics")
-    check_quality_gate(val_metrics, metric=require_str(gate_cfg, "metric"),
-                       min_value=gate_cfg.get("min_value"), max_value=gate_cfg.get("max_value"))
+    logger.info("10) AUDIT on test split (report only, never tune on it)")
+    test_metrics = evaluate_model(model, X_test, y_test, s["problem_type"])
+    logger.info("Test metrics (final audit): %s", test_metrics)
+    tracking.log_metrics(run, {f"metrics/test/{k}": v for k, v in test_metrics.items()})
 
 
 def save_and_register(cfg: Dict[str, Any], s: Dict[str, Any], model: Any, run: Any) -> str:
@@ -378,34 +356,6 @@ def log_predictions(cfg: Dict[str, Any], s: Dict[str, Any], df_predictions: pd.D
         )
 
 
-def run_pipeline(cfg: Dict[str, Any], s: Dict[str, Any], run: Any) -> None:
-    """
-    The golden path, in order: data -> model -> gate -> audit -> save -> infer
-
-    Inputs
-    - cfg: full config, s: settings, run: W&B run or None
-
-    Outputs
-    - None. Writes processed data, model and predictions; raises on any failed check
-    """
-    X_train, X_val, X_test, y_train, y_val, y_test = prepare_training_data(cfg, s, run)
-    candidates = build_candidates(cfg, s, X_train, y_train)
-    final_model = candidates[-1][1]
-    final_val_metrics = evaluate_candidates(cfg, s, candidates, X_val, y_val, run)
-
-    apply_quality_gate(s["gate"], final_val_metrics)
-
-    if s["evaluate_on_test"]:
-        logger.info("10) AUDIT on test split (report only, never tune on it)")
-        test_metrics = evaluate_model(final_model, X_test, y_test, s["problem_type"])
-        logger.info("Test metrics (final audit): %s", test_metrics)
-        tracking.log_metrics(run, {f"metrics/test/{k}": v for k, v in test_metrics.items()})
-
-    artifact_name = save_and_register(cfg, s, final_model, run)
-    log_predictions(cfg, s, batch_inference(cfg, s, final_model), artifact_name, run)
-    logger.info("Done | processed=%s | model=%s | predictions=%s", s["processed"], s["model"], s["predictions"])
-
-
 def parse_args() -> argparse.Namespace:
     """
     Command line interface
@@ -423,28 +373,47 @@ def parse_args() -> argparse.Namespace:
 
 def main(config_path: Optional[Path] = None) -> None:
     """
-    Entry point: python -m src.main [--config path]
-
-    Inputs
-    - config_path: config file (default: repo root config.yaml)
-
-    Outputs
-    - None. Raises on any failure; the W&B run is then marked as failed
-
-    Why it matters
-    - One entry point that CI (dvc repro), teammates and the grader run the same way
+    Entry point: python -m src.main [--config path]. Reads like the recipe: every step in order
+    Inputs: config_path (default: repo root config.yaml)
+    Outputs: None. Writes processed data, model and predictions; raises on any failure (W&B run marked failed)
+    Why: one entry point for CI (dvc repro), teammates and the grader; the quality gate sits before
+    save_and_register, so a weak model is never saved, registered or deployed
     """
     # Secrets (for example WANDB_API_KEY) come from .env, never from config.yaml
     load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
-
     cfg = load_config(config_path or PROJECT_ROOT / "config.yaml")
-    settings = read_settings(cfg)
-    configure_logging(log_level=require_str(require_section(cfg, "logging"), "level"), log_file=settings["log_file"])
+    s = read_settings(cfg)
+    configure_logging(log_level=require_str(require_section(cfg, "logging"), "level"), log_file=s["log_file"])
+    is_classification = s["problem_type"] == "classification"
+    split_cfg, gate = require_section(cfg, "split"), s["gate"]
 
     run = tracking.start_run(cfg)
     try:
-        logger.info("Starting pipeline")
-        run_pipeline(cfg, settings, run)
+        df_clean = load_and_clean(s, run)
+        logger.info("4) VALIDATE training data (before the split: bad data never reaches training)")
+        validate_dataframe(df_clean, [s["target"]] + s["feature_cols"], s["target"], s["check_missing"],
+                           [0, 1] if is_classification else None, s["non_negative_cols"])
+
+        logger.info("5) SPLIT train/val/test (the identifier is kept for traceability, never used as a feature)")
+        X_train, X_val, X_test, y_train, y_val, y_test = split_data(
+            df_clean.drop(columns=[s["target"], s["id_col"]], errors="ignore"), df_clean[s["target"]],
+            require_float(split_cfg, "test_size"), require_float(split_cfg, "val_size"),
+            require_int(split_cfg, "random_state"), is_classification)
+
+        candidates = build_candidates(cfg, s, X_train, y_train)
+        final_model = candidates[-1][1]
+        val_metrics = evaluate_candidates(cfg, s, candidates, X_val, y_val, run)
+        if bool(gate.get("enabled", False)):
+            logger.info("9) QUALITY GATE on validation metrics")
+            check_quality_gate(val_metrics, metric=require_str(gate, "metric"),
+                               min_value=gate.get("min_value"), max_value=gate.get("max_value"))
+        else:
+            logger.warning("9) QUALITY GATE disabled in config.yaml, any model will be saved")
+
+        audit_on_test(s, final_model, X_test, y_test, run)
+        artifact_name = save_and_register(cfg, s, final_model, run)
+        log_predictions(cfg, s, batch_inference(cfg, s, final_model), artifact_name, run)
+        logger.info("Done | processed=%s | model=%s | predictions=%s", s["processed"], s["model"], s["predictions"])
     except Exception:
         # logger.exception keeps the full stack trace in the log file
         logger.exception("Pipeline failed")

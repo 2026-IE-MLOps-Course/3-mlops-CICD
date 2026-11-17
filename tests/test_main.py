@@ -142,10 +142,11 @@ def test_unit_read_settings_rejects_bad_config(tmp_path, flags):
         main_module.read_settings(cfg)
 
 
-def test_unit_quality_gate_disabled_or_passing_lets_the_model_through():
-    assert main_module.apply_quality_gate({"enabled": False}, {"pr_auc": 0.1}) is None
-    assert main_module.apply_quality_gate({"enabled": True, "metric": "pr_auc", "min_value": 0.4},
-                                          {"pr_auc": 0.6}) is None
+def test_unit_audit_on_test_runs_only_when_enabled(tmp_path, flags, monkeypatch):
+    calls = spy(monkeypatch, "evaluate_model")
+    settings = main_module.read_settings(make_config(tmp_path, flags))
+    assert main_module.audit_on_test(settings, None, None, None, None) is None
+    assert calls["n"] == 0
 
 
 def test_unit_build_candidates_rejects_non_numeric_binning_column(tmp_path, flags):
@@ -188,6 +189,12 @@ def test_integration_test_split_is_audited_once_when_enabled(pipeline_cfg, monke
     evaluate_calls = spy(monkeypatch, "evaluate_model")
     main_module.main()
     assert evaluate_calls["n"] == 3
+
+
+def test_integration_passing_quality_gate_saves_the_model(pipeline_cfg):
+    pipeline_cfg["evaluation"]["quality_gate"] = {"enabled": True, "metric": "pr_auc", "min_value": 0.0}
+    main_module.main()
+    assert Path(pipeline_cfg["paths"]["model_artifact"]).exists()
 
 
 def test_integration_quality_gate_failure_stops_before_saving(pipeline_cfg, monkeypatch):
