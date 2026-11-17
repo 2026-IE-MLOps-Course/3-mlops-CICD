@@ -1,6 +1,13 @@
 # --------------------------------------------------------
 # Serving container only
 # Packages the FastAPI inference service, NOT training code.
+#
+# Release image = code + ONE promoted model ("promote with a label, ship with a release")
+#   deploy.yml runs scripts/fetch_prod_model.py (W&B alias prod -> e.g. opioid_classification_model:v7),
+#   then builds with:
+#     docker build --build-arg MODEL_VERSION=opioid_classification_model:v7 \
+#                  --build-arg GIT_COMMIT=$(git rev-parse HEAD) -t mlops-api:local .
+#   Rollback = redeploy the previous release image: code and model roll back together
 # --------------------------------------------------------
 
 # Pin an exact base image tag: "latest" can change under you and break a build that worked yesterday
@@ -44,8 +51,19 @@ RUN conda install -c conda-forge conda-lock -y && \
 # it uses the correct Python environment with all dependencies installed
 ENV PATH=/opt/conda/envs/mlops/bin:$PATH
 
-# Copy only what .dockerignore allows: config.yaml, src/ and (optionally) models/
+# Copy only what .dockerignore allows: config.yaml, src/ and models/ (the baked model)
 COPY . .
+
+# Traceability, baked in at build time: /health reports both values
+# MODEL_VERSION: the registry version the model came from; GIT_COMMIT: the commit the code came from
+ARG MODEL_VERSION=unknown
+ARG GIT_COMMIT=local
+ENV MODEL_VERSION=${MODEL_VERSION} \
+    GIT_COMMIT=${GIT_COMMIT} \
+    MODEL_SOURCE=local
+LABEL org.opencontainers.image.revision=${GIT_COMMIT} \
+      org.opencontainers.image.title="opioid-risk-api" \
+      io.github.mlops.model-version=${MODEL_VERSION}
 
 # Expose a default port (mostly for local documentation)
 EXPOSE 8000
