@@ -3,6 +3,8 @@
 # and is reused by deploy.yml to recheck the exact commit being released
 # Branch protection: require the "lint" and "test-and-build" checks on dev and main
 # Evidence: every run keeps the pipeline log, predictions and coverage as a downloadable artifact
+# The model CI trains is evidence of reproducibility ONLY: it is never uploaded, pushed or deployed.
+# Releases ship the model a person promoted in W&B (alias prod), see deploy.yml
 
 name: CI - Quality Gate
 
@@ -19,6 +21,10 @@ on:
                 type: string
                 required: false
                 default: ""
+        secrets:
+            DAGSHUB_TOKEN:
+                description: "Read token for dvc pull (deploy.yml passes only this secret)"
+                required: false
 
 # Least privilege: CI only reads the code
 permissions:
@@ -83,13 +89,6 @@ jobs:
                   conda install -n base -c conda-forge conda-lock -y
                   conda run -n base conda-lock install --name mlops conda-lock.yml
 
-            # DVC is in environment.yml; this pinned install covers a conda-lock.yml not yet regenerated
-            - name: Install DVC
-              shell: bash -el {0}
-              run: |
-                  conda activate mlops
-                  pip install "dvc==3.67.1"
-
             # Pull requests from forks receive no secrets; use internal branches (dev, feature/*)
             - name: Pull the data version recorded in Git (DagsHub)
               shell: bash -el {0}
@@ -103,6 +102,7 @@ jobs:
                   dvc remote modify dagshub --local password "$DAGSHUB_TOKEN"
                   dvc pull
 
+            # Reproducibility check: same data version + same code must pass the same quality gate
             - name: Run the full pipeline with DVC (the model quality gate runs here)
               shell: bash -el {0}
               run: |
@@ -117,11 +117,11 @@ jobs:
                   grep -E "Validation metrics|Quality gate|Test metrics" logs/pipeline.log >> "$GITHUB_STEP_SUMMARY" || echo "No gate result: the pipeline stopped earlier" >> "$GITHUB_STEP_SUMMARY"
                   echo '```' >> "$GITHUB_STEP_SUMMARY"
 
-            - name: Run tests with coverage (minimum 75%)
+            - name: Run tests with branch coverage (minimum 90% branch)
               shell: bash -el {0}
               run: |
                   conda activate mlops
-                  pytest --cov=src --cov-report=term-missing --cov-report=xml --cov-fail-under=75
+                  pytest --cov=src --cov-branch --cov-report=term-missing --cov-report=xml --cov-fail-under=90
 
             - name: Keep the evidence as a traceable artifact, pass or fail
               if: always()
@@ -136,12 +136,6 @@ jobs:
                   retention-days: 30
                   if-no-files-found: warn
 
-            - name: Upload the gated model for container packaging
-              uses: actions/upload-artifact@v7
-              with:
-                  name: gated-model
-                  path: models/model.joblib
-                  retention-days: 30
-
+            # Build check only: this image is never pushed (the release image is built in deploy.yml)
             - name: Docker image must build
-              run: docker build -t mlops-api:ci .
+              run: docker build --build-arg GIT_COMMIT="${GITHUB_SHA}" --build-arg MODEL_VERSION=ci-build-check -t mlops-api:ci .
