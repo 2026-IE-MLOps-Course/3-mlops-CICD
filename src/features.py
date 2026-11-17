@@ -48,6 +48,78 @@ def _binary_sum_names_out(estimator, input_features) -> np.ndarray:
     return np.array(["binary_sum"])
 
 
+def _quantile_block(cols: List[str], n_bins: int) -> Pipeline:
+    """
+    Impute -> quantile bin -> scale
+
+    Inputs
+    - cols: numeric columns to bucket (used by ColumnTransformer, listed here for readability)
+    - n_bins: number of quantile buckets
+
+    Outputs
+    - Unfitted Pipeline; the median and the bin edges are learned on training data only
+    """
+    return Pipeline(
+        steps=[
+            ("impute", SimpleImputer(strategy="median")),
+            ("qbin", KBinsDiscretizer(
+                n_bins=n_bins,
+                encode="ordinal",
+                strategy="quantile",
+                quantile_method="averaged_inverted_cdf",
+            )),
+            ("scale", StandardScaler()),
+        ]
+    )
+
+
+def _onehot_block() -> Pipeline:
+    """
+    Impute -> one hot encode
+
+    Outputs
+    - Unfitted Pipeline; handle_unknown="ignore" avoids crashes when new categories appear at inference time
+    """
+    return Pipeline(
+        steps=[
+            ("impute", SimpleImputer(strategy="most_frequent")),
+            ("ohe", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
+        ]
+    )
+
+
+def _binary_sum_block() -> Pipeline:
+    """
+    Impute -> row sum of indicator flags -> scale
+
+    Outputs
+    - Unfitted Pipeline; the derived feature is computed inside the model, so training and serving agree
+    """
+    return Pipeline(
+        steps=[
+            ("impute", SimpleImputer(strategy="most_frequent")),
+            ("sum", FunctionTransformer(func=_row_sum_numpy, validate=False,
+                                        feature_names_out=_binary_sum_names_out)),
+            ("scale", StandardScaler()),
+        ]
+    )
+
+
+def _numeric_block() -> Pipeline:
+    """
+    Impute -> scale
+
+    Outputs
+    - Unfitted Pipeline for plain numeric features
+    """
+    return Pipeline(
+        steps=[
+            ("impute", SimpleImputer(strategy="median")),
+            ("scale", StandardScaler()),
+        ]
+    )
+
+
 def get_feature_preprocessor(
     quantile_bin_cols: Optional[List[str]] = None,
     categorical_onehot_cols: Optional[List[str]] = None,
@@ -74,81 +146,25 @@ def get_feature_preprocessor(
     if n_bins < 2:
         raise ValueError("Fatal: n_bins must be >= 2 for quantile binning")
 
-    quantile_bin_cols = quantile_bin_cols or []
-    categorical_onehot_cols = categorical_onehot_cols or []
-    numeric_passthrough_cols = numeric_passthrough_cols or []
-    binary_sum_cols = binary_sum_cols or []
-
-    if not (quantile_bin_cols or categorical_onehot_cols or numeric_passthrough_cols or binary_sum_cols):
-        raise ValueError(
-            "Fatal: No feature columns configured for the preprocessor")
-
+    # Order is part of the saved artifact: keep it stable
     transformers = []
-
-    # 1) Quantile features: Impute -> Quantile bin -> Scale
-    # The imputer and quantile thresholds are learned only during pipeline.fit on training data
     if quantile_bin_cols:
-        quantile_pipe = Pipeline(
-            steps=[
-                ("impute", SimpleImputer(strategy="median")),
-                ("qbin", KBinsDiscretizer(
-                    n_bins=n_bins,
-                    encode="ordinal",
-                    strategy="quantile",
-                    quantile_method="averaged_inverted_cdf",
-                )),
-                ("scale", StandardScaler()),
-            ]
-        )
-        transformers.append(
-            ("quantile_bins", quantile_pipe, quantile_bin_cols))
-
-    # 2) Categorical features: Impute -> One hot encode
-    # handle_unknown="ignore" avoids crashes when new categories appear at inference time
+        transformers.append(("quantile_bins", _quantile_block(quantile_bin_cols, n_bins), quantile_bin_cols))
     if categorical_onehot_cols:
-        try:
-            onehot = OneHotEncoder(
-                handle_unknown="ignore", sparse_output=False)
-        except TypeError:
-            onehot = OneHotEncoder(handle_unknown="ignore", sparse=False)
-
-        cat_pipe = Pipeline(
-            steps=[
-                ("impute", SimpleImputer(strategy="most_frequent")),
-                ("ohe", onehot),
-            ]
-        )
-        transformers.append(("cat_ohe", cat_pipe, categorical_onehot_cols))
-
-    # 3) Derived feature: binary_sum computed inside the pipeline for training serving consistency
+        transformers.append(("cat_ohe", _onehot_block(), categorical_onehot_cols))
     if binary_sum_cols:
-        binary_sum_pipe = Pipeline(
-            steps=[
-                ("impute", SimpleImputer(strategy="most_frequent")),
-                ("sum", FunctionTransformer(func=_row_sum_numpy,
-                 validate=False, feature_names_out=_binary_sum_names_out)),
-                ("scale", StandardScaler()),
-            ]
-        )
-        transformers.append(("binary_sum", binary_sum_pipe, binary_sum_cols))
-
-    # 4) Standard numeric features: Impute -> Scale
+        transformers.append(("binary_sum", _binary_sum_block(), binary_sum_cols))
     if numeric_passthrough_cols:
-        num_pipe = Pipeline(
-            steps=[
-                ("impute", SimpleImputer(strategy="median")),
-                ("scale", StandardScaler()),
-            ]
-        )
-        transformers.append(("num_scaled", num_pipe, numeric_passthrough_cols))
+        transformers.append(("num_scaled", _numeric_block(), numeric_passthrough_cols))
+
+    if not transformers:
+        raise ValueError("Fatal: No feature columns configured for the preprocessor")
 
     # remainder="drop" is a strict gatekeeper
     # Only configured columns enter the model, unexpected columns are ignored rather than silently changing
     # the feature space
-    preprocessor = ColumnTransformer(
+    return ColumnTransformer(
         transformers=transformers,
         remainder="drop",
         verbose_feature_names_out=True,
     )
-
-    return preprocessor
