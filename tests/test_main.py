@@ -199,11 +199,12 @@ def test_integration_passing_quality_gate_saves_the_model(pipeline_cfg):
 
 def test_integration_quality_gate_failure_stops_before_saving(pipeline_cfg, monkeypatch):
     pipeline_cfg["evaluation"]["quality_gate"] = {"enabled": True, "metric": "pr_auc", "min_value": 1.01}
-    artifacts = spy(monkeypatch, "save_and_register")
+    saves = spy(monkeypatch, "save_model")
+    artifacts = spy(monkeypatch, "register_artifacts")
     with pytest.raises(ValueError, match="Quality gate FAILED"):
         main_module.main()
     assert not Path(pipeline_cfg["paths"]["model_artifact"]).exists()
-    assert artifacts["n"] == 0, "no file saved and nothing logged to the W&B registry"
+    assert saves["n"] == 0 and artifacts["n"] == 0, "no file saved and nothing logged to the W&B registry"
 
 
 def test_integration_missing_raw_data_fails_fast(pipeline_cfg):

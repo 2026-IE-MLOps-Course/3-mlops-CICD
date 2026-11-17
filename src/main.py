@@ -287,19 +287,19 @@ def audit_on_test(s: Dict[str, Any], model: Any, X_test: pd.DataFrame, y_test: p
     tracking.log_metrics(run, {f"metrics/test/{k}": v for k, v in test_metrics.items()})
 
 
-def save_and_register(cfg: Dict[str, Any], s: Dict[str, Any], model: Any, run: Any) -> str:
+def register_artifacts(cfg: Dict[str, Any], s: Dict[str, Any], run: Any) -> str:
     """
-    Save the gated model and log it (plus the processed data) as W&B artifacts
+    Log the saved, gated model (and the processed data) as W&B artifacts
 
     Inputs
-    - cfg, s: config and settings; model: the gated model; run: W&B run or None
+    - cfg, s: config and settings; run: W&B run or None
 
     Outputs
     - artifact_name: the registry name, reused for the predictions artifact
-    """
-    logger.info("11) SAVE model artifact")
-    save_model(model, s["model"])
 
+    Why: called only after the gate passed and save_model() wrote the file, so every registry version is gated
+    """
+    logger.info("11) REGISTER model artifact")
     artifact_name = str(tracking.wandb_setting(cfg, "model_artifact_name", "model"))
     tracking.log_file_artifact(
         run, name=artifact_name, artifact_type="model", file_path=s["model"],
@@ -377,7 +377,7 @@ def main(config_path: Optional[Path] = None) -> None:
     Inputs: config_path (default: repo root config.yaml)
     Outputs: None. Writes processed data, model and predictions; raises on any failure (W&B run marked failed)
     Why: one entry point for CI (dvc repro), teammates and the grader; the quality gate sits before
-    save_and_register, so a weak model is never saved, registered or deployed
+    save_model, so a weak model is never saved, registered or deployed
     """
     # Secrets (for example WANDB_API_KEY) come from .env, never from config.yaml
     load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
@@ -411,12 +411,12 @@ def main(config_path: Optional[Path] = None) -> None:
             logger.warning("9) QUALITY GATE disabled in config.yaml, any model will be saved")
 
         audit_on_test(s, final_model, X_test, y_test, run)
-        artifact_name = save_and_register(cfg, s, final_model, run)
+        save_model(final_model, s["model"])
+        artifact_name = register_artifacts(cfg, s, run)
         log_predictions(cfg, s, batch_inference(cfg, s, final_model), artifact_name, run)
         logger.info("Done | processed=%s | model=%s | predictions=%s", s["processed"], s["model"], s["predictions"])
     except Exception:
-        # logger.exception keeps the full stack trace in the log file
-        logger.exception("Pipeline failed")
+        logger.exception("Pipeline failed")  # keeps the full stack trace in the log file
         tracking.finish_run(run, exit_code=1)
         raise
     tracking.finish_run(run)
