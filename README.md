@@ -18,7 +18,14 @@
 | `2-mlops-modularized-repo` | Notebook to tested Python modules | 4 to 9 |
 | `3-mlops-CICD` (this repo) | Config, logging, tracking, serving, containers, CI/CD | 10 to 14 |
 
-Your group project starts from the course skeleton `4-mlops-project-skeleton`. This repository is a teaching reference: study the engineering pattern and apply the same logic to your own dataset and model.
+This repository is a teaching reference: study the engineering pattern and apply the same logic to your own dataset and model.
+
+### How to use this reference
+
+- **Read and compare, do not copy.** Your group project starts from the course skeleton `4-mlops-project-skeleton`, with your own data, target, metric and business case. Copied code from this repo is easy to spot and teaches you nothing
+- **Use it to answer "what does good look like?"** For each graded practice, open the matching file here (section 10 maps them), read why it is built that way (module docstrings), then build your own version
+- **Run it before you build yours.** The quick start below takes about 10 minutes: watching the gate, the tests and a release work end to end makes your own design decisions easier
+- **Follow the order of the sessions:** configuration and logging, then tracking, then serving and Docker, then CI/CD (section 13 gives a reading order)
 
 ---
 
@@ -76,7 +83,7 @@ Value: at the same weekly call capacity, about three times more high-risk patien
 
 | What | Link |
 |---|---|
-| Live API (Render) | https://opioid-risk-api.onrender.com (try it at https://opioid-risk-api.onrender.com/docs) |
+| Live API (Render) | `https://<new-render-service>.onrender.com` (paste the new image-backed service URL; try it at `/docs`) |
 | Experiment tracking and model registry (W&B) | https://wandb.ai/idiazl/opioid-risk-classification |
 | Data versions (DagsHub) | https://dagshub.com/phidesigner/3-mlops-CICD |
 | Business value video | TODO: video link |
@@ -90,10 +97,7 @@ Value: at the same weekly call capacity, about three times more high-risk patien
 conda-lock install --name mlops conda-lock.yml   # or: conda env create -f environment.yml
 conda activate mlops
 
-# 2. Authenticate DVC with DagsHub (token from DagsHub > Settings > Tokens; never put it in .env or Git) and pull data
-dvc remote modify dagshub --local auth basic
-dvc remote modify dagshub --local user <your-dagshub-user>
-dvc remote modify dagshub --local password <your-dagshub-token>
+# 2. Pull the exact data versions (the DagsHub repo is public: no account or token needed to read)
 dvc pull
 
 # 3. Add your secrets (never commit .env)
@@ -255,7 +259,7 @@ docker run -p 8000:8000 --name mlops-api mlops-api:local
 python scripts/smoke_test.py --url http://127.0.0.1:8000 --expect-commit $(git rev-parse HEAD)
 ```
 
-The image contains only `config.yaml`, `src/`, `models/` and the locked environment (see the allow-list in `.dockerignore`). No tests, notebooks, data or secrets. It runs with `MODEL_SOURCE=local` and the baked model; `MODEL_VERSION` and `GIT_COMMIT` are set at build time and reported by `/health`, and the image carries the labels `org.opencontainers.image.revision` and `io.github.mlops.model-version`. Pass `--env-file .env` only if you want prediction logs sent to W&B.
+The Dockerfile has two stages. The builder installs `conda-lock.yml` exactly, then keeps only the packages the API needs (the dependency closure of its imports, at the locked versions). The runtime stage, a slim Debian base, receives that environment, `config.yaml`, `src/` and `models/` (see the allow-list in `.dockerignore`): about 0.9 GB instead of 4.3 GB, no conda, tests, notebooks, data or secrets, and it runs as a non-root user. It runs with `MODEL_SOURCE=local` and the baked model; `MODEL_VERSION` and `GIT_COMMIT` are set at build time and reported by `/health`, and the image carries the labels `org.opencontainers.image.revision` and `io.github.mlops.model-version`. Pass `--env-file .env` only if you want prediction logs sent to W&B.
 
 ---
 
@@ -279,7 +283,9 @@ dvc dag        # draw the stages
 git add data/raw/opioid_raw_data.csv.dvc data/inference/opioid_infer_01.csv.dvc dvc.lock && git commit -m "Record pipeline run"
 ```
 
-First time: configure your DagsHub credentials locally with `dvc remote modify dagshub --local ...` (written to `.dvc/config.local`, ignored by Git), then run `dvc pull` and `dvc repro`. DVC is part of `environment.yml` and `conda-lock.yml`.
+First time: run `dvc pull`, then `dvc repro` (the remote is public for reading). To `dvc push` new data you need write access: configure your DagsHub token locally with `dvc remote modify dagshub --local auth basic`, `... --local user <user>` and `... --local password <token>` (written to `.dvc/config.local`, ignored by Git, never in `.env`). DVC is part of `environment.yml` and `conda-lock.yml`.
+
+> **Do not re-save the CSVs.** `dvc pull` returns the exact bytes recorded in the `.dvc` pointer. Opening a CSV in Excel or a text editor and saving it, or converting its line endings (Windows CRLF vs Linux LF), changes the md5 even if no value changed: `dvc status` then reports modified data and `dvc repro` rewrites the pointer to a version DagsHub does not have. If that happens, restore the original with `dvc checkout`.
 
 ### Continuous Integration: `.github/workflows/ci.yml`
 
@@ -307,8 +313,7 @@ A person decides **what** ships (moves the W&B alias `prod`) and **when** (publi
 
 **Render** (New > Web Service > **Existing image**, Free plan):
 
-- Image URL: a fixed release tag such as `ghcr.io/<owner>/<repo>:3.0.0`, never `latest` (after that, the deploy hook passes the exact `X.Y.Z` of each release). If the package is private, add a registry credential: a GitHub token with only `read:packages`. Or make the package public (GitHub > Packages > package settings)
-- First release only: the service needs an image to start from. Publish the first release without `RENDER_DEPLOY_HOOK_URL` (its deploy job stops at the settings check, nothing deploys), create the service from the image that release pushed, add the secret and variable, then use "Re-run failed jobs" on that run
+- Image URL: a fixed release tag such as `ghcr.io/<owner>/<repo>:3.0.0`, never `latest` (after that, the deploy hook passes the exact `X.Y.Z` of each release). The package is public, so Render needs no registry credential (for a private package, add one: a GitHub token with only `read:packages`)
 - Settings > Auto-Deploy: **Off** (only releases deploy)
 - Health Check Path: `/health`
 - Environment variables: `WANDB_API_KEY` and `WANDB_ENTITY`, used only to send prediction logs to W&B. The model is baked into the image, so no `MODEL_SOURCE` or alias settings are needed
@@ -327,10 +332,21 @@ A person decides **what** ships (moves the W&B alias `prod`) and **when** (publi
 
 Pull requests from forks receive no secrets, so work on internal branches (`dev`, `feature/*`).
 
+**First release on an image-backed service** (the service needs an image before it can start, and the first image comes from the first release):
+
+1. Delete the old deploy hook secret: `gh secret delete RENDER_DEPLOY_HOOK_URL` (it belongs to the old service)
+2. Publish the release (see "How to release"). guard, ci and publish-image run and push `ghcr.io/<owner>/<repo>:X.Y.Z`; the deploy job stops at "Check required deploy settings", so nothing is deployed
+3. Render > New > Web Service > Existing image: `ghcr.io/<owner>/<repo>:X.Y.Z`, with the settings above. Copy its deploy hook
+4. Set the new secret and variable: `gh secret set RENDER_DEPLOY_HOOK_URL` and `gh variable set RENDER_SERVICE_URL --body https://<new-service>.onrender.com`
+5. Actions > the release run > **Re-run failed jobs**: the deploy job now calls the new hook and smoke-tests the live URL, so the release run ends green
+6. Suspend the old service (Render > old service > Settings > Suspend), and update the live link in section 2
+
 **GitHub branch protection** (Settings > Branches, for `main` and `dev`):
 
 - Require a pull request and 1 approval
 - Require status checks to pass: `lint` and `test-and-build`
+
+This is a solo reference repo, so it requires 0 approvals on `main` and `dev`; student teams require 1 approval on both.
 
 ### How to release
 
