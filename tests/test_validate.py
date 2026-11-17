@@ -1,100 +1,75 @@
 # tests/test_validate.py
-
 """
 Educational Goal:
-- Why this test exists in an MLOps system: Ensure our "security gate" triggers correctly when bad data arrives.
-- Responsibility (separation of concerns): Test validation logic independently of cleaning, features, or training.
-- Pipeline contract: validate_dataframe raises ValueError on empty data, missing columns, or constraint
-  violations, and returns True for clean data.
+- Every validation rule has a test that triggers it, so a silent regression is impossible
+- Validation never fixes data: it returns True or raises
 """
 
+import numpy as np
 import pandas as pd
 import pytest
 
+from src.clean_data import clean_dataframe
 from src.validate import validate_dataframe
 
 
-# --------------------------------------------------------
-# 1) FAIL FAST: Empty DataFrame
-# --------------------------------------------------------
-def test_validate_fails_on_empty_dataframe():
-    """An empty dataframe should immediately crash the pipeline."""
-    df_empty = pd.DataFrame()
-
-    with pytest.raises(ValueError, match="empty"):
-        validate_dataframe(
-            df=df_empty,
-            required_columns=["A"]
-        )
+@pytest.fixture
+def good_df() -> pd.DataFrame:
+    return pd.DataFrame({"OD": [0, 1, 0], "rx_ds": [1.0, 2.0, 0.0], "A": [1, 0, 1]})
 
 
-# --------------------------------------------------------
-# 2) CONTRACT CHECK: Missing required columns
-# --------------------------------------------------------
-def test_validate_fails_on_missing_columns():
-    """Missing inputs break the downstream recipe, so we catch it early."""
-    df_missing_col = pd.DataFrame({"A": [1, 2, 3]})
+def test_unit_valid_dataframe_returns_true(good_df):
+    assert validate_dataframe(good_df, ["OD", "rx_ds", "A"], "OD", target_allowed_values=[0, 1],
+                              numeric_non_negative_cols=["rx_ds"]) is True
 
+
+def test_unit_target_without_allowed_values_accepts_any_label(good_df):
+    good_df["OD"] = [0.5, 2.0, 3.0]
+    assert validate_dataframe(good_df, ["OD"], "OD") is True
+
+
+@pytest.mark.parametrize("bad, error", [(None, ValueError), ([1, 2], TypeError), (pd.DataFrame(), ValueError)])
+def test_unit_rejects_none_wrong_type_and_empty(bad, error):
+    with pytest.raises(error):
+        validate_dataframe(bad, ["OD"])
+
+
+def test_unit_rejects_empty_required_columns(good_df):
+    with pytest.raises(ValueError, match="required_columns is empty"):
+        validate_dataframe(good_df, [])
+
+
+def test_unit_rejects_missing_columns_after_name_standardisation(good_df):
+    assert validate_dataframe(good_df, [" rx ds "]) is True  # same rule as clean_data.py headers
     with pytest.raises(ValueError, match="Missing required columns"):
-        validate_dataframe(
-            df=df_missing_col,
-            required_columns=["A", "B"]
-        )
+        validate_dataframe(good_df, ["rx_ds", "B"])
 
 
-# --------------------------------------------------------
-# 3) DOMAIN CONSTRAINT: Invalid target classes
-# --------------------------------------------------------
-def test_validate_fails_on_invalid_target_values():
-    """Classification models break if unexpected target classes appear."""
-    df_bad_target = pd.DataFrame({
-        "target": [0, 2, 1],  # 2 is an invalid class
-        "feature": [10, 20, 30],
-    })
-
-    with pytest.raises(ValueError, match="invalid"):
-        validate_dataframe(
-            df=df_bad_target,
-            required_columns=["target", "feature"],
-            target_column="target",
-            target_allowed_values=[0, 1],
-        )
+def test_unit_missing_values_policy(good_df):
+    good_df.loc[0, "A"] = np.nan
+    assert validate_dataframe(good_df, ["A"], check_missing_values=False) is True
+    with pytest.raises(ValueError, match="Missing values found"):
+        validate_dataframe(good_df, ["A"], check_missing_values=True)
 
 
-# --------------------------------------------------------
-# 4) DOMAIN CONSTRAINT: Negative numeric values
-# --------------------------------------------------------
-def test_validate_fails_on_negative_values():
-    """Domain logic like 'no negative values' must be strictly enforced."""
-    df_bad_math = pd.DataFrame({
-        "target": [0, 1, 0],
-        "days_supply": [10, -5, 30],  # -5 is an invalid negative value
-    })
+def test_unit_target_rules(good_df):
+    with pytest.raises(ValueError, match="not found"):
+        validate_dataframe(good_df, ["A"], "target")
+    with pytest.raises(ValueError, match="invalid values"):
+        validate_dataframe(good_df.assign(OD=[0, 1, 2]), ["OD"], "OD", target_allowed_values=[0, 1])
+    with pytest.raises(ValueError, match="contains missing values"):
+        validate_dataframe(good_df.assign(OD=[0, np.nan, 1]), ["A"], "OD")
 
+
+def test_unit_non_negative_rules(good_df):
+    with pytest.raises(ValueError, match="missing column"):
+        validate_dataframe(good_df, ["A"], numeric_non_negative_cols=["Z"])
+    with pytest.raises(TypeError, match="not numeric"):
+        validate_dataframe(good_df.assign(rx_ds=["a", "b", "c"]), ["A"], numeric_non_negative_cols=["rx_ds"])
     with pytest.raises(ValueError, match="negative values"):
-        validate_dataframe(
-            df=df_bad_math,
-            required_columns=["target", "days_supply"],
-            numeric_non_negative_cols=["days_supply"],
-        )
+        validate_dataframe(good_df.assign(rx_ds=[1.0, -1.0, 0.0]), ["A"], numeric_non_negative_cols=["rx_ds"])
 
 
-# --------------------------------------------------------
-# 5) HAPPY PATH: Valid simple dataset
-# --------------------------------------------------------
-def test_validate_passes_on_valid_dataframe():
-    """Clean data silently passes the gate returning True."""
-    df_clean = pd.DataFrame({
-        "target": [0, 1, 0],
-        "days_supply": [10, 20, 30],
-    })
-
-    result = validate_dataframe(
-        df=df_clean,
-        required_columns=["target", "days_supply"],
-        target_column="target",
-        target_allowed_values=[0, 1],
-        numeric_non_negative_cols=["days_supply"],
-    )
-
-    assert result is True
+def test_integration_inference_rows_from_cleaner_pass_without_target(make_patients, flags):
+    df = clean_dataframe(make_patients(5, with_target=False), target_column=None)
+    assert validate_dataframe(df, flags + ["rx_ds"], numeric_non_negative_cols=["rx_ds"]) is True

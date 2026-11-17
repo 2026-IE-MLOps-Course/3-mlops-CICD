@@ -1,119 +1,84 @@
 # tests/test_infer.py
 """
 Educational Goal:
-- Why this test exists in an MLOps system: Ensure the inference module strictly honors the pipeline contract.
-- Responsibility: Verify that predictions are formatted correctly (preserving indexes), probabilities are
-  mathematically sound, and bad inputs crash early.
+- run_inference keeps the input index, never modifies its input and returns a fixed schema:
+  prediction, plus probability when include_proba=True
 """
 
+import numpy as np
 import pandas as pd
 import pytest
-from sklearn.dummy import DummyClassifier, DummyRegressor
 
+from src.clean_data import clean_dataframe
+from src.features import get_feature_preprocessor
 from src.infer import run_inference
+from src.train import train_model
+
+
+class FakeModel:
+    """A stand-in model whose probability output we control, to reach the defensive branches."""
+
+    def __init__(self, proba=None):
+        self.proba = proba
+
+    def predict(self, X):
+        return np.ones(len(X), dtype=int)
+
+    def predict_proba(self, X):
+        return self.proba
+
+
+class NoProba:
+    def predict(self, X):
+        return np.ones(len(X))
 
 
 @pytest.fixture
-def dummy_inference_data():
-    """Provides a minimal feature DataFrame with a custom index to test index preservation."""
-    X = pd.DataFrame(
-        {"f1": [0.0, 1.0, 0.0, 1.0], "f2": [1.0, 1.0, 0.0, 0.0]},
-        index=["patient_10", "patient_11", "patient_12", "patient_13"]
-    )
-    y = pd.Series([0, 1, 0, 1], index=X.index)
-    return X, y
+def X():
+    return pd.DataFrame({"x": [1.0, 2.0, 3.0]}, index=[10, 20, 30])
 
 
-@pytest.fixture
-def dummy_classifier(dummy_inference_data):
-    """Mock classification model supporting predict() and predict_proba()."""
-    X, y = dummy_inference_data
-    model = DummyClassifier(strategy="prior")
-    model.fit(X, y)
-    return model
+def test_unit_prediction_only_keeps_index(X):
+    out = run_inference(FakeModel(), X)
+    assert list(out.columns) == ["prediction"]
+    assert list(out.index) == [10, 20, 30]
 
 
-@pytest.fixture
-def dummy_regressor(dummy_inference_data):
-    """Mock regression model supporting predict() but NOT predict_proba()."""
-    X, y = dummy_inference_data
-    model = DummyRegressor(strategy="mean")
-    model.fit(X, y)
-    return model
+def test_unit_probability_column_when_requested(X):
+    out = run_inference(FakeModel(np.array([[0.2, 0.8]] * 3)), X, True)
+    assert out["probability"].tolist() == [0.8, 0.8, 0.8]
 
 
-# --------------------------------------------------------
-# 1) HAPPY PATH: Output Schema & Index Preservation
-# --------------------------------------------------------
-def test_inference_returns_dataframe_and_preserves_index(dummy_classifier, dummy_inference_data):
-    """Ensure standard inference returns the exact correct shape and retains the patient IDs."""
-    X, _ = dummy_inference_data
-    df_pred = run_inference(model=dummy_classifier,
-                            X_infer=X, include_proba=False)
-
-    assert isinstance(df_pred, pd.DataFrame)
-    assert list(df_pred.columns) == ["prediction"]
-    assert len(df_pred) == len(X)
-
-    # Critical MLOps check: the original index must be perfectly preserved
-    pd.testing.assert_index_equal(df_pred.index, X.index)
+def test_unit_rejects_bad_inputs(X):
+    with pytest.raises(ValueError, match="empty"):
+        run_inference(FakeModel(), X.iloc[:0])
+    with pytest.raises(TypeError, match="DataFrame"):
+        run_inference(FakeModel(), X.to_numpy())
+    with pytest.raises(TypeError, match="predict"):
+        run_inference(object(), X)
 
 
-def test_inference_include_proba_adds_valid_probability(dummy_classifier, dummy_inference_data):
-    """Ensure probabilities are extracted correctly and are mathematically valid."""
-    X, _ = dummy_inference_data
-    df_pred = run_inference(model=dummy_classifier,
-                            X_infer=X, include_proba=True)
-
-    assert "prediction" in df_pred.columns
-    assert "proba" in df_pred.columns
-
-    # Mathematical guardrails: Must be float and bounded between 0.0 and 1.0
-    assert pd.api.types.is_float_dtype(df_pred["proba"])
-    assert (df_pred["proba"] >= 0.0).all()
-    assert (df_pred["proba"] <= 1.0).all()
+def test_unit_rejects_bad_probability_outputs(X):
+    with pytest.raises(TypeError, match="predict_proba"):
+        run_inference(NoProba(), X, True)
+    with pytest.raises(ValueError, match="invalid shape"):
+        run_inference(FakeModel([[0.2, 0.8]] * 3), X, True)  # a list, not an ndarray
+    with pytest.raises(ValueError, match="at least 2 columns"):
+        run_inference(FakeModel(np.ones((3, 1))), X, True)
 
 
-# --------------------------------------------------------
-# 2) CONTRACT CHECKS: Model Guardrails
-# --------------------------------------------------------
-def test_raises_if_model_has_no_predict(dummy_inference_data):
-    """Crash immediately if the loaded artifact is not a Scikit-Learn estimator."""
-    X, _ = dummy_inference_data
+def test_integration_pipeline_scores_cleaned_rows_without_touching_input(make_patients, flags):
+    train = make_patients(80)
+    pre = get_feature_preprocessor(quantile_bin_cols=["rx_ds"], numeric_passthrough_cols=flags,
+                                   binary_sum_cols=flags, n_bins=4)
+    model = train_model(train.drop(columns=["ID", "OD"]), train["OD"], pre, "classification", None, 0)
 
-    class BadArtifact:
-        pass
+    new = clean_dataframe(make_patients(6, with_target=False, start_id=500), target_column=None)
+    X_new = new.drop(columns=["ID"])
+    X_new.index = [5, 8, 11, 14, 17, 20]
+    before = X_new.copy()
 
-    with pytest.raises(TypeError, match="Fatal: model must implement predict"):
-        run_inference(model=BadArtifact(), X_infer=X, include_proba=False)
-
-
-def test_raises_if_proba_requested_but_unsupported(dummy_regressor, dummy_inference_data):
-    """Crash if a user asks for probabilities from a model that cannot provide them."""
-    X, _ = dummy_inference_data
-
-    with pytest.raises(TypeError, match="does not support predict_proba"):
-        run_inference(model=dummy_regressor, X_infer=X, include_proba=True)
-
-
-# --------------------------------------------------------
-# 3) FAIL FAST: Structural Guardrails
-# --------------------------------------------------------
-def test_raises_on_empty_X_infer(dummy_classifier, dummy_inference_data):
-    """Crash if an empty payload is sent to the inference engine."""
-    X, _ = dummy_inference_data
-    X_empty = X.iloc[0:0]
-
-    with pytest.raises(ValueError, match="Fatal: X_infer is empty"):
-        run_inference(model=dummy_classifier,
-                      X_infer=X_empty, include_proba=False)
-
-
-def test_raises_if_X_infer_not_dataframe(dummy_classifier, dummy_inference_data):
-    """Crash if X_infer is a raw numpy array, preventing silent feature-name drops."""
-    X, _ = dummy_inference_data
-    X_numpy = X.values
-
-    with pytest.raises(TypeError, match="Fatal: X_infer must be a pandas DataFrame"):
-        run_inference(model=dummy_classifier,
-                      X_infer=X_numpy, include_proba=False)
+    out = run_inference(model, X_new, include_proba=True)
+    assert list(out.index) == list(X_new.index)
+    assert X_new.equals(before)
+    assert set(out["prediction"].unique()) <= {0, 1}

@@ -1,387 +1,232 @@
+# tests/test_main.py
 """
 Educational Goal:
-- Verify orchestrator correctness with a config-driven pipeline
-- Unit test split math
-- Run a safe end-to-end pipeline in an isolated temp directory
-- Enforce separation of concerns by spying on module delegation
+- Unit test the split contract: split_data(X, y, test_size, val_size, random_state, stratify)
+- Run the whole pipeline end to end on tiny synthetic CSVs in tmp_path (never the real data/ folder)
+- Prove the quality gate stops a weak model BEFORE it is saved
+- Spy on delegation: main.py orchestrates, the modules do the work
 """
 
+import runpy
+import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict
 
-import joblib
 import pandas as pd
 import pytest
+import yaml
 from sklearn.calibration import CalibratedClassifierCV
 
 import src.main as main_module
+from src.utils import load_model
 
 
 # --------------------------------------------------------
-# 1) UNIT TESTS: 3-WAY SPLIT MATH
+# Helpers: synthetic inputs and an in-memory config with the real schema
+# --------------------------------------------------------
+def make_config(tmp_path: Path, flags, problem_type: str = "classification") -> Dict[str, Any]:
+    """Every path points into tmp_path, so the real data/, models/ and reports/ folders are never touched."""
+    return {
+        "paths": {
+            "raw_data": str(tmp_path / "raw.csv"),
+            "processed_data": str(tmp_path / "out" / "clean.csv"),
+            "model_artifact": str(tmp_path / "out" / "model.joblib"),
+            "inference_data": str(tmp_path / "infer.csv"),
+            "predictions_artifact": str(tmp_path / "out" / "predictions.csv"),
+            "log_file": str(tmp_path / "out" / "pipeline.log"),
+        },
+        "logging": {"level": "INFO"},
+        "problem": {"target_column": "OD", "problem_type": problem_type, "identifier_column": "ID"},
+        "split": {"test_size": 0.15, "val_size": 0.15, "random_state": 42},
+        "training": {
+            "classification": {"model_type": "logistic_regression", "max_iter": 200, "solver": "liblinear",
+                               "class_weight": "balanced", "calibration_enabled": True,
+                               "calibration_method": "sigmoid", "calibration_cv": 3},
+            "regression": {"model_type": "linear_regression"},
+        },
+        "features": {"quantile_bin": ["rx_ds"], "categorical_onehot": [], "numeric_passthrough": flags,
+                     "binary_sum_cols": flags, "n_bins": 4},
+        "validation": {"numeric_non_negative_cols": ["rx_ds"], "check_missing_values": False},
+        "evaluation": {"evaluate_on_test": False, "quality_gate": {"enabled": False}},
+        "run": {"include_proba_if_classification": True},
+    }
+
+
+@pytest.fixture
+def pipeline_cfg(tmp_path, monkeypatch, make_patients, flags):
+    """Write tiny raw and inference CSVs and make main() read the in-memory config."""
+    cfg = make_config(tmp_path, flags)
+    make_patients(200).to_csv(cfg["paths"]["raw_data"], index=False)
+    make_patients(10, with_target=False, start_id=900).to_csv(cfg["paths"]["inference_data"], index=False)
+    monkeypatch.setattr(main_module, "load_config", lambda _path: cfg)
+    return cfg
+
+
+def spy(monkeypatch, name: str) -> Dict[str, int]:
+    """Count calls to main_module.<name> while still running the real function."""
+    calls = {"n": 0}
+    original = getattr(main_module, name)
+
+    def _wrapper(*args, **kwargs):
+        calls["n"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(main_module, name, _wrapper)
+    return calls
+
+
+# --------------------------------------------------------
+# 1) Unit tests: split contract
 # --------------------------------------------------------
 @pytest.fixture
-def dummy_split_data() -> Tuple[pd.DataFrame, pd.Series]:
-    """Predictable dataset for split testing (100 rows, imbalanced target)."""
-    X = pd.DataFrame({"feature1": range(100), "feature2": range(100)})
+def split_xy():
+    X = pd.DataFrame({"f1": range(100), "f2": range(100)})
     y = pd.Series([0] * 80 + [1] * 20, name="target")
     return X, y
 
 
-def test_three_way_split_correct_sizes(dummy_split_data):
-    """Ensure the math correctly partitions a 100-row dataset."""
-    X, y = dummy_split_data
-
-    X_train, X_val, X_test, y_train, y_val, y_test = main_module.three_way_split(
-        X,
-        y,
-        test_size=0.10,
-        val_size=0.20,
-        random_state=42,
-        stratify=False,
-    )
-
-    assert len(X_test) == 10
-    assert len(X_val) == 20
-    assert len(X_train) == 70
-    assert len(y_train) == 70
-    assert len(y_val) == 20
-    assert len(y_test) == 10
+def test_unit_split_data_sizes_are_shares_of_the_whole_dataset(split_xy):
+    X_train, X_val, X_test, y_train, y_val, y_test = main_module.split_data(*split_xy, 0.10, 0.20, 42, False)
+    assert (len(X_train), len(X_val), len(X_test)) == (70, 20, 10)
+    assert (len(y_train), len(y_val), len(y_test)) == (70, 20, 10)
+    assert not (set(X_train.index) & set(X_val.index) or set(X_train.index) & set(X_test.index))
 
 
-def test_three_way_split_stratification_preserves_ratio(dummy_split_data):
-    """Ensure classification splits preserve the 80/20 class imbalance."""
-    X, y = dummy_split_data
-
-    _, _, _, _, _, y_test = main_module.three_way_split(
-        X,
-        y,
-        test_size=0.10,
-        val_size=0.20,
-        random_state=42,
-        stratify=True,
-    )
-
-    assert (y_test == 1).sum() == 2
+def test_unit_split_data_stratifies_and_is_deterministic(split_xy):
+    first = main_module.split_data(*split_xy, 0.20, 0.20, 7, True)
+    second = main_module.split_data(*split_xy, 0.20, 0.20, 7, True)
+    assert all(list(a.index) == list(b.index) for a, b in zip(first[:3], second[:3]))
+    assert [float(part.mean()) for part in first[3:]] == pytest.approx([0.2, 0.2, 0.2])
 
 
-def test_three_way_split_invalid_sizes_raises(dummy_split_data):
-    """Crash if configuration asks for impossible split ratios."""
-    X, y = dummy_split_data
+@pytest.mark.parametrize("test_size, val_size", [(0.0, 0.2), (0.2, 0.0), (0.5, 0.5)])
+def test_unit_split_data_rejects_invalid_sizes(split_xy, test_size, val_size):
+    with pytest.raises(ValueError, match="Split sizes"):
+        main_module.split_data(*split_xy, test_size, val_size, 42, False)
 
-    with pytest.raises(ValueError, match="Split sizes must satisfy"):
-        main_module.three_way_split(
-            X,
-            y,
-            test_size=0.60,
-            val_size=0.50,
-            random_state=42,
-            stratify=False,
-        )
+
+def test_unit_split_data_falls_back_when_stratification_is_impossible(split_xy):
+    X, _ = split_xy
+    y = pd.Series([0] * 99 + [1])  # one positive row cannot be stratified
+    parts = main_module.split_data(X, y, 0.10, 0.20, 42, True)
+    assert sum(len(p) for p in parts[:3]) == 100
+
+
+def test_unit_split_data_reraises_when_not_stratified():
+    X, y = pd.DataFrame({"f": [1, 2]}), pd.Series([0, 1])
+    with pytest.raises(ValueError):
+        main_module.split_data(X, y, 0.4, 0.4, 42, False)
 
 
 # --------------------------------------------------------
-# 2) END-TO-END ORCHESTRATION TESTS (CONFIG-DRIVEN)
+# 2) Unit tests: settings and gate
 # --------------------------------------------------------
-def _binary_sum_cols_for_tests() -> List[str]:
-    """
-    Keep this local to the test suite so tests do not depend on internal module constants.
-    Must match the feature configuration used in the test config.
-    """
-    return [
-        "A",
-        "B",
-        "C",
-        "D",
-        "E",
-        "F",
-        "H",
-        "I",
-        "J",
-        "K",
-        "L",
-        "M",
-        "N",
-        "R",
-        "S",
-        "T",
-        "Low_inc",
-        "SURG",
-    ]
+def test_unit_read_settings_rejects_bad_config(tmp_path, flags):
+    cfg = make_config(tmp_path, flags, problem_type="clustering")
+    with pytest.raises(ValueError, match="problem_type"):
+        main_module.read_settings(cfg)
+
+    cfg = make_config(tmp_path, [])
+    cfg["features"]["quantile_bin"] = []
+    with pytest.raises(ValueError, match="at least 1 column"):
+        main_module.read_settings(cfg)
+
+    cfg = make_config(tmp_path, flags)
+    cfg["training"]["classification"] = ["not", "a", "mapping"]
+    with pytest.raises(ValueError, match="must be a mapping"):
+        main_module.read_settings(cfg)
+
+    cfg = make_config(tmp_path, flags)
+    del cfg["run"]
+    with pytest.raises(ValueError, match="'run'"):
+        main_module.read_settings(cfg)
 
 
-def _make_synthetic_raw_df(binary_sum_cols: List[str], n_rows: int = 200) -> pd.DataFrame:
-    """Build a minimal dataset matching the feature config and target expectations."""
-    df = pd.DataFrame(
-        {
-            "ID": list(range(n_rows)),
-            "OD": [i % 2 for i in range(n_rows)],
-            "rx_ds": list(range(n_rows)),
-        }
-    )
-    for col in binary_sum_cols:
-        df[col] = [i % 2 for i in range(n_rows)]
-    return df
+def test_unit_quality_gate_disabled_or_passing_lets_the_model_through():
+    assert main_module.apply_quality_gate({"enabled": False}, {"pr_auc": 0.1}) is None
+    assert main_module.apply_quality_gate({"enabled": True, "metric": "pr_auc", "min_value": 0.4},
+                                          {"pr_auc": 0.6}) is None
 
 
-def _make_synthetic_inference_df(binary_sum_cols: List[str], n_rows: int = 10) -> pd.DataFrame:
-    """
-    Build inference inputs that match feature expectations.
-
-    Notes
-    - No OD column by design
-    - Includes ID for traceability
-    """
-    df = pd.DataFrame(
-        {
-            "ID": list(range(1000, 1000 + n_rows)),
-            "rx_ds": list(range(10, 10 + n_rows)),
-        }
-    )
-    for col in binary_sum_cols:
-        df[col] = [i % 2 for i in range(n_rows)]
-    return df
+def test_unit_build_candidates_rejects_non_numeric_binning_column(tmp_path, flags):
+    cfg = make_config(tmp_path, flags)
+    settings = main_module.read_settings(cfg)
+    X = pd.DataFrame({"rx_ds": ["a", "b"]})
+    with pytest.raises(ValueError, match="must be numeric"):
+        main_module.build_candidates(cfg, settings, X, pd.Series([0, 1]))
 
 
-def _make_test_config(tmp_path: Path, binary_sum_cols: List[str]) -> Dict[str, Any]:
-    """
-    Build an in-memory config dict that mirrors the real config.yaml schema.
-
-    We return a dict and monkeypatch main_module.load_config to return it.
-    This keeps the test isolated from the real repo config file.
-    """
-    raw_path = tmp_path / "data" / "raw" / "opioid_raw_data.csv"
-    clean_path = tmp_path / "data" / "processed" / "clean.csv"
-    model_path = tmp_path / "models" / "model.joblib"
-    inference_path = tmp_path / "data" / "inference" / "opioid_infer_01.csv"
-    predictions_path = tmp_path / "reports" / "predictions.csv"
-    log_file_path = tmp_path / "logs" / "pipeline.log"
-
-    return {
-        "paths": {
-            "raw_data": str(raw_path),
-            "processed_data": str(clean_path),
-            "model_artifact": str(model_path),
-            "inference_data": str(inference_path),
-            "predictions_artifact": str(predictions_path),
-            "log_file": str(log_file_path),
-        },
-        "problem": {
-            "target_column": "OD",
-            "problem_type": "classification",
-            "identifier_column": "ID",
-        },
-        "split": {
-            "test_size": 0.10,
-            "val_size": 0.20,
-            "random_state": 42,
-        },
-        "features": {
-            "quantile_bin": ["rx_ds"],
-            "categorical_onehot": [],
-            "numeric_passthrough": [],
-            "binary_sum_cols": binary_sum_cols,
-            "n_bins": 4,
-        },
-        "validation": {
-            "numeric_non_negative_cols": ["rx_ds"],
-            "check_missing_values": False,
-        },
-        "evaluation": {
-            "calibration_bins": 5,
-            "evaluate_on_test": False,
-            "quality_gate": {"enabled": False},
-        },
-        "run": {
-            "include_proba_if_classification": True,
-            "overwrite_outputs": True,
-        },
-        "logging": {
-            "level": "INFO",
-            "format": "text",
-        },
-        "training": {
-            "classification": {
-                "model_type": "logistic_regression",
-                "max_iter": 200,
-                "solver": "liblinear",
-                "random_state": 42,
-                "class_weight": "balanced",
-                "calibration_enabled": True,
-                "calibration_method": "sigmoid",
-                "calibration_cv": 3,
-            },
-            "regression": {
-                "model_type": "linear_regression",
-            },
-        },
-    }
+def test_unit_parse_args_reads_config_flag(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "argv", ["src.main", "--config", str(tmp_path / "c.yaml")])
+    assert main_module.parse_args().config == tmp_path / "c.yaml"
 
 
-def _patch_config_loader(monkeypatch, cfg: Dict[str, Any]):
-    """
-    Patch main_module.load_config so main() reads our in-memory config.
-    """
-
-    def _fake_load_config(_config_path: Path) -> Dict[str, Any]:
-        return cfg
-
-    monkeypatch.setattr(main_module, "load_config", _fake_load_config)
-
-
-def test_main_end_to_end_creates_clean_model_and_predictions_artifacts(tmp_path, monkeypatch):
-    """
-    Proves the pipeline cleans data, trains a calibrated model,
-    and saves artifacts including inference outputs.
-    """
-    binary_sum_cols = _binary_sum_cols_for_tests()
-    cfg = _make_test_config(tmp_path, binary_sum_cols)
-    _patch_config_loader(monkeypatch, cfg)
-
-    raw_path = Path(cfg["paths"]["raw_data"])
-    inference_path = Path(cfg["paths"]["inference_data"])
-    clean_path = Path(cfg["paths"]["processed_data"])
-    model_path = Path(cfg["paths"]["model_artifact"])
-    predictions_path = Path(cfg["paths"]["predictions_artifact"])
-
-    raw_path.parent.mkdir(parents=True, exist_ok=True)
-    _make_synthetic_raw_df(binary_sum_cols=binary_sum_cols,
-                           n_rows=200).to_csv(raw_path, index=False)
-
-    inference_path.parent.mkdir(parents=True, exist_ok=True)
-    _make_synthetic_inference_df(binary_sum_cols=binary_sum_cols, n_rows=10).to_csv(
-        inference_path, index=False
-    )
-
+# --------------------------------------------------------
+# 3) Integration tests: the whole pipeline
+# --------------------------------------------------------
+def test_integration_main_writes_clean_data_model_and_predictions(pipeline_cfg):
     main_module.main()
 
-    # Cleaned data artifact
-    assert clean_path.exists()
-    df_clean = pd.read_csv(clean_path)
-    assert "ID" in df_clean.columns
-
-    # Model artifact
-    assert model_path.exists()
-    model = joblib.load(model_path)
-    assert isinstance(model, CalibratedClassifierCV)
-    assert hasattr(model, "predict")
-    assert hasattr(model, "predict_proba")
-
-    # Predictions artifact
-    assert predictions_path.exists()
-    df_preds = pd.read_csv(predictions_path)
-
-    assert "prediction" in df_preds.columns
-    assert "proba" in df_preds.columns
-    assert len(df_preds) == 10
-
-    # Traceability contract: keep ID for audit joins
-    assert "ID" in df_preds.columns
-    assert df_preds["ID"].notna().all()
+    paths = pipeline_cfg["paths"]
+    assert Path(paths["processed_data"]).exists()
+    assert isinstance(load_model(Path(paths["model_artifact"])), CalibratedClassifierCV)
+    preds = pd.read_csv(paths["predictions_artifact"])
+    assert list(preds.columns) == ["ID", "prediction", "probability"]
+    assert len(preds) == 10
 
 
-def test_main_calls_evaluate_twice_and_infer_once_when_calibration_enabled(tmp_path, monkeypatch):
-    """
-    Spy test.
-
-    We intercept calls to ensure the orchestrator:
-    - evaluates before calibration
-    - evaluates after calibration
-    - runs inference once with the final saved model
-    """
-    binary_sum_cols = _binary_sum_cols_for_tests()
-    cfg = _make_test_config(tmp_path, binary_sum_cols)
-    _patch_config_loader(monkeypatch, cfg)
-
-    raw_path = Path(cfg["paths"]["raw_data"])
-    inference_path = Path(cfg["paths"]["inference_data"])
-
-    raw_path.parent.mkdir(parents=True, exist_ok=True)
-    _make_synthetic_raw_df(binary_sum_cols=binary_sum_cols,
-                           n_rows=200).to_csv(raw_path, index=False)
-
-    inference_path.parent.mkdir(parents=True, exist_ok=True)
-    _make_synthetic_inference_df(binary_sum_cols=binary_sum_cols, n_rows=10).to_csv(
-        inference_path, index=False
-    )
-
-    called = {"evaluate": 0, "infer": 0}
-
-    original_evaluate = main_module.evaluate_model
-    original_infer = main_module.run_inference
-
-    def _spy_evaluate(*args, **kwargs):
-        called["evaluate"] += 1
-        return original_evaluate(*args, **kwargs)
-
-    def _spy_infer(*args, **kwargs):
-        called["infer"] += 1
-        return original_infer(*args, **kwargs)
-
-    monkeypatch.setattr(main_module, "evaluate_model", _spy_evaluate)
-    monkeypatch.setattr(main_module, "run_inference", _spy_infer)
-
+def test_integration_main_evaluates_twice_and_infers_once(pipeline_cfg, monkeypatch):
+    evaluate_calls = spy(monkeypatch, "evaluate_model")
+    infer_calls = spy(monkeypatch, "run_inference")
     main_module.main()
+    assert evaluate_calls["n"] == 2  # before and after calibration
+    assert infer_calls["n"] == 1
 
-    assert called["evaluate"] == 2
-    assert called["infer"] == 1
+
+def test_integration_test_split_is_audited_once_when_enabled(pipeline_cfg, monkeypatch):
+    pipeline_cfg["evaluation"]["evaluate_on_test"] = True
+    evaluate_calls = spy(monkeypatch, "evaluate_model")
+    main_module.main()
+    assert evaluate_calls["n"] == 3
 
 
-def test_main_raises_when_raw_data_missing(tmp_path, monkeypatch):
-    """Pipeline must crash immediately if raw input data is missing."""
-    binary_sum_cols = _binary_sum_cols_for_tests()
-    cfg = _make_test_config(tmp_path, binary_sum_cols)
-    _patch_config_loader(monkeypatch, cfg)
+def test_integration_quality_gate_failure_stops_before_saving(pipeline_cfg, monkeypatch):
+    pipeline_cfg["evaluation"]["quality_gate"] = {"enabled": True, "metric": "pr_auc", "min_value": 1.01}
+    artifacts = spy(monkeypatch, "save_and_register")
+    with pytest.raises(ValueError, match="Quality gate FAILED"):
+        main_module.main()
+    assert not Path(pipeline_cfg["paths"]["model_artifact"]).exists()
+    assert artifacts["n"] == 0, "no file saved and nothing logged to the W&B registry"
 
-    raw_path = Path(cfg["paths"]["raw_data"])
-    assert not raw_path.exists()
 
+def test_integration_missing_raw_data_fails_fast(pipeline_cfg):
+    Path(pipeline_cfg["paths"]["raw_data"]).unlink()
     with pytest.raises(FileNotFoundError):
         main_module.main()
 
 
-def _write_inputs(cfg: Dict[str, Any], binary_sum_cols: List[str]) -> None:
-    raw_path = Path(cfg["paths"]["raw_data"])
-    inference_path = Path(cfg["paths"]["inference_data"])
-    raw_path.parent.mkdir(parents=True, exist_ok=True)
-    inference_path.parent.mkdir(parents=True, exist_ok=True)
-    _make_synthetic_raw_df(binary_sum_cols=binary_sum_cols, n_rows=200).to_csv(raw_path, index=False)
-    _make_synthetic_inference_df(binary_sum_cols=binary_sum_cols, n_rows=10).to_csv(inference_path, index=False)
+def test_integration_regression_pipeline_without_id_column(pipeline_cfg, tmp_path, flags, make_patients):
+    pipeline_cfg.update(make_config(tmp_path, flags, problem_type="regression"))
+    pipeline_cfg["wandb"] = {"enabled": False, "log_processed_data": True, "log_predictions": True,
+                             "log_predictions_table": True}
+    make_patients(10, with_target=False).drop(columns=["ID"]).to_csv(
+        pipeline_cfg["paths"]["inference_data"], index=False)
 
-
-def test_quality_gate_failure_stops_pipeline_before_saving_model(tmp_path, monkeypatch):
-    """
-    The most important CD rule: a model that misses the agreed threshold is never saved,
-    so it can never be registered in W&B or deployed
-    """
-    binary_sum_cols = _binary_sum_cols_for_tests()
-    cfg = _make_test_config(tmp_path, binary_sum_cols)
-    cfg["evaluation"]["quality_gate"] = {"enabled": True, "metric": "roc_auc", "min_value": 1.01}
-    _patch_config_loader(monkeypatch, cfg)
-    _write_inputs(cfg, binary_sum_cols)
-
-    with pytest.raises(ValueError, match="Quality gate FAILED"):
-        main_module.main()
-
-    assert not Path(cfg["paths"]["model_artifact"]).exists()
-
-
-def test_test_split_is_evaluated_once_when_audit_enabled(tmp_path, monkeypatch):
-    """With evaluate_on_test: true we expect 2 validation evaluations + 1 test audit."""
-    binary_sum_cols = _binary_sum_cols_for_tests()
-    cfg = _make_test_config(tmp_path, binary_sum_cols)
-    cfg["evaluation"]["evaluate_on_test"] = True
-    _patch_config_loader(monkeypatch, cfg)
-    _write_inputs(cfg, binary_sum_cols)
-
-    calls = {"n": 0}
-    original_evaluate = main_module.evaluate_model
-
-    def _spy(*args, **kwargs):
-        calls["n"] += 1
-        return original_evaluate(*args, **kwargs)
-
-    monkeypatch.setattr(main_module, "evaluate_model", _spy)
     main_module.main()
 
-    assert calls["n"] == 3
+    preds = pd.read_csv(pipeline_cfg["paths"]["predictions_artifact"])
+    assert list(preds.columns) == ["prediction"]
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_integration_cli_runs_pipeline_from_a_config_file(tmp_path, monkeypatch, make_patients, flags):
+    cfg = make_config(tmp_path, flags)
+    make_patients(200).to_csv(cfg["paths"]["raw_data"], index=False)
+    make_patients(10, with_target=False).to_csv(cfg["paths"]["inference_data"], index=False)
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", ["src.main", "--config", str(config_file)])
+    runpy.run_module("src.main", run_name="__main__")
+
+    assert Path(cfg["paths"]["predictions_artifact"]).exists()
