@@ -17,8 +17,8 @@ stages:
       size: 48592
     - path: src
       hash: md5
-      md5: e32cac6682e801682e57f934459966d5.dir
-      size: 91176
+      md5: 5df80e8101e0452e88d91fdcc6f41de6.dir
+      size: 90639
       nfiles: 14
     outs:
     - path: data/processed/clean.csv
