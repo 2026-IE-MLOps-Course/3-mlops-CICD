@@ -13,76 +13,162 @@ Teaching note
 """
 
 import logging
+import os
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import wandb
+import yaml
 
 from src.evaluate import evaluate_calibration
 
 logger = logging.getLogger(__name__)
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 
 def _wandb_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the wandb section of config.yaml, or an empty dict when it is missing or malformed."""
     value = cfg.get("wandb")
     return value if isinstance(value, dict) else {}
 
 
 def _clean_list(value: Any) -> List[str]:
+    """Return the non-empty strings of a list (config tags), or an empty list."""
     if not isinstance(value, list):
         return []
     return [str(v).strip() for v in value if v is not None and str(v).strip()]
 
 
-def start_run(cfg: Dict[str, Any]):
+def git_commit(repo_root: Path = PROJECT_ROOT) -> str:
+    """
+    Inputs
+    - repo_root: folder inside the Git checkout
+
+    Outputs
+    - The current commit SHA; GITHUB_SHA in CI when git is unavailable; "unknown" otherwise
+
+    Why it matters
+    - A registry version must name the exact code that produced it
+    """
+    try:
+        result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_root, capture_output=True,
+                                text=True, check=True, timeout=10)
+        return result.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return os.getenv("GITHUB_SHA", "unknown")
+
+
+def dvc_pointer_md5(data_path: Path) -> str:
+    """
+    Inputs
+    - data_path: a DVC-tracked file, e.g. data/raw/opioid_raw_data.csv (its pointer is <file>.dvc)
+
+    Outputs
+    - The md5 recorded in the pointer, or "unknown" when there is no readable pointer
+
+    Why it matters
+    - The md5 links a model version to the exact data version on the DVC remote (dvc pull restores it)
+    """
+    pointer = Path(f"{data_path}.dvc")
+    try:
+        outs = (yaml.safe_load(pointer.read_text(encoding="utf-8")) or {}).get("outs") or [{}]
+        return str(outs[0].get("md5") or "unknown")
+    except (OSError, yaml.YAMLError, AttributeError):
+        return "unknown"
+
+
+def run_lineage(cfg: Dict[str, Any], repo_root: Path = PROJECT_ROOT) -> Dict[str, str]:
+    """
+    Inputs
+    - cfg: full configuration (paths.raw_data names the data file)
+    - repo_root: repository root
+
+    Outputs
+    - {"git_commit": <sha>, "raw_data_md5": <md5>}, stored on the run config
+    """
+    raw = str((cfg.get("paths") or {}).get("raw_data") or "")
+    return {
+        "git_commit": git_commit(repo_root),
+        "raw_data_md5": dvc_pointer_md5(repo_root / raw) if raw else "unknown",
+    }
+
+
+def _text_or_none(value: Any) -> Optional[str]:
+    """Return a stripped string, or None for missing or blank values (W&B then uses its default)."""
+    text = str(value or "").strip()
+    return text or None
+
+
+def _init_kwargs(wb: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate the wandb section of config.yaml into wandb.init() keyword arguments (empty -> None)."""
+    project = _text_or_none(wb.get("project"))
+    if project is None:
+        raise ValueError("config.yaml: wandb.project must be a non-empty string when wandb.enabled is true")
+    return {
+        "project": project,
+        "name": _text_or_none(wb.get("name")),
+        "job_type": _text_or_none(wb.get("job_type")) or "training-pipeline",
+        "group": _text_or_none(wb.get("group")),
+        "notes": _text_or_none(wb.get("notes")),
+        "tags": _clean_list(wb.get("tags")) or None,
+    }
+
+
+def start_run(cfg: Dict[str, Any]) -> Optional[Any]:
     """
     Inputs
     - cfg: Full configuration dictionary (the whole config is stored on the run for lineage)
 
     Outputs
     - run: An active W&B run, or None when tracking is disabled
+
+    Why it matters
+    - The run config also records the Git commit and the raw-data md5 (from the .dvc pointer),
+      so every registry version traces back to its code and its data
     """
     wb = _wandb_cfg(cfg)
     if not bool(wb.get("enabled", False)):
         logger.info("W&B disabled in config.yaml, continuing without experiment tracking")
         return None
 
-    project = str(wb.get("project") or "").strip()
-    if not project:
-        raise ValueError("config.yaml: wandb.project must be a non-empty string when wandb.enabled is true")
-
-    run = wandb.init(
-        project=project,
-        name=str(wb.get("name") or "").strip() or None,
-        job_type=str(wb.get("job_type") or "training-pipeline").strip(),
-        group=str(wb.get("group") or "").strip() or None,
-        notes=str(wb.get("notes") or "").strip() or None,
-        tags=_clean_list(wb.get("tags")) or None,
-        config=cfg,
-    )
+    kwargs = _init_kwargs(wb)
+    lineage = run_lineage(cfg)
+    run = wandb.init(config={**cfg, "lineage": lineage}, **kwargs)
     run.summary["entrypoint"] = "python -m src.main"
-    logger.info("Initialized W&B run | name=%s | project=%s", run.name, project)
+    logger.info("Initialized W&B run | name=%s | project=%s | commit=%s | raw_data_md5=%s",
+                run.name, kwargs["project"], lineage["git_commit"], lineage["raw_data_md5"])
     return run
 
 
-def log_metrics(run, metrics: Dict[str, Any]) -> None:
-    """Log a flat dictionary of numbers. Does nothing when run is None."""
+def log_metrics(run: Optional[Any], metrics: Dict[str, Any]) -> None:
+    """
+    Inputs: run (W&B run or None) and metrics (flat dictionary of numbers)
+    Outputs: None. Does nothing when run is None, so the pipeline runs without W&B
+    """
     if run is None:
         return
     run.log({k: float(v) for k, v in metrics.items()})
 
 
-def log_table(run, key: str, df: pd.DataFrame) -> None:
-    """Log a small DataFrame as an interactive W&B Table. Does nothing when run is None."""
+def log_table(run: Optional[Any], key: str, df: pd.DataFrame) -> None:
+    """
+    Inputs: run (W&B run or None), key (panel name) and df (small DataFrame)
+    Outputs: None. Logs an interactive W&B Table; does nothing when run is None or df is empty
+    """
     if run is None or df is None or df.empty:
         return
     run.log({key: wandb.Table(dataframe=df)})
 
 
-def log_file_artifact(run, *, name: str, artifact_type: str, file_path: Path, description: str) -> None:
+def log_file_artifact(run: Optional[Any], *, name: str, artifact_type: str, file_path: Path, description: str) -> None:
     """
     Version a file (model, dataset, predictions) as a W&B Artifact
+
+    Inputs: run (or None), name, artifact_type ("model", "dataset", ...), file_path, description
+    Outputs: None. A new artifact version (v0, v1, ...) in the W&B project
 
     Why this matters
     - Artifacts give lineage: which data and code produced which model
@@ -96,9 +182,12 @@ def log_file_artifact(run, *, name: str, artifact_type: str, file_path: Path, de
     logger.info("Logged W&B artifact | name=%s | type=%s", name, artifact_type)
 
 
-def log_classification_plots(run, cfg: Dict[str, Any], X_val: pd.DataFrame, y_val: pd.Series,
-                             model, stage_name: str) -> None:
-    """Log optional ROC, PR, confusion matrix and calibration table, controlled by config flags."""
+def log_classification_plots(run: Optional[Any], cfg: Dict[str, Any], X_val: pd.DataFrame, y_val: pd.Series,
+                             model: Any, stage_name: str) -> None:
+    """
+    Inputs: run (or None), cfg (wandb.log_* flags), validation split, fitted model, stage_name (panel suffix)
+    Outputs: None. Logs the optional ROC, PR, confusion matrix and calibration table
+    """
     if run is None or not hasattr(model, "predict_proba"):
         return
 
@@ -130,18 +219,27 @@ def log_classification_plots(run, cfg: Dict[str, Any], X_val: pd.DataFrame, y_va
         log_table(run, f"tables/calibration_val_{stage_name}", table)
 
 
-def finish_run(run, exit_code: int = 0) -> None:
-    """Close the run so W&B uploads everything. exit_code=1 marks the run as failed."""
+def finish_run(run: Optional[Any], exit_code: int = 0) -> None:
+    """
+    Inputs: run (or None) and exit_code (1 marks the run as failed)
+    Outputs: None. Closes the run so W&B uploads everything
+    """
     if run is None:
         return
     run.finish(exit_code=exit_code)
 
 
 def wandb_flag(cfg: Dict[str, Any], key: str, default: bool = False) -> bool:
-    """Read a boolean switch from the wandb section of config.yaml."""
+    """
+    Inputs: cfg, key and default
+    Outputs: the boolean switch wandb.<key> from config.yaml
+    """
     return bool(_wandb_cfg(cfg).get(key, default))
 
 
 def wandb_setting(cfg: Dict[str, Any], key: str, default: Optional[Any] = None) -> Any:
-    """Read any value from the wandb section of config.yaml."""
+    """
+    Inputs: cfg, key and default
+    Outputs: the value wandb.<key> from config.yaml, or default
+    """
     return _wandb_cfg(cfg).get(key, default)
