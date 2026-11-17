@@ -371,6 +371,7 @@ Free Render services sleep after inactivity. The first request can take about a 
 ├── data/
 │   ├── raw/opioid_raw_data.csv.dvc          # pointer in Git; the CSV comes from DagsHub (dvc pull)
 │   └── inference/opioid_infer_01.csv.dvc
+├── docs/DEMO.md                   # 10-minute class demo script (screenshots in docs/demo/)
 ├── notebooks/                     # exploration only, imports from src/
 ├── scripts/
 │   ├── fetch_prod_model.py        # W&B alias prod -> concrete version -> models/model.joblib
