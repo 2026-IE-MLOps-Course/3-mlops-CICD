@@ -300,12 +300,12 @@ def register_artifacts(cfg: Dict[str, Any], s: Dict[str, Any], run: Any) -> str:
     Why: called only after the gate passed and save_model() wrote the file, so every registry version is gated
     """
     logger.info("11) REGISTER model artifact")
-    artifact_name = str(tracking.wandb_setting(cfg, "model_artifact_name", "model"))
+    artifact_name = str(tracking.setting(cfg, "model_artifact_name", "model"))
     tracking.log_file_artifact(
         run, name=artifact_name, artifact_type="model", file_path=s["model"],
         description="Scikit-learn pipeline (preprocessing + model), passed the quality gate",
     )
-    if tracking.wandb_flag(cfg, "log_processed_data"):
+    if tracking.flag(cfg, "log_processed_data"):
         tracking.log_file_artifact(
             run, name=f"{artifact_name}-processed-data", artifact_type="dataset",
             file_path=s["processed"], description="Cleaned training dataset",
@@ -346,10 +346,10 @@ def log_predictions(cfg: Dict[str, Any], s: Dict[str, Any], df_predictions: pd.D
     - None. Writes the predictions CSV and, when enabled, a W&B table and artifact
     """
     save_csv(df_predictions, s["predictions"])
-    if tracking.wandb_flag(cfg, "log_predictions_table"):
-        n_rows = int(tracking.wandb_setting(cfg, "predictions_table_rows", 200))
+    if tracking.flag(cfg, "log_predictions_table"):
+        n_rows = int(tracking.setting(cfg, "predictions_table_rows", 200))
         tracking.log_table(run, "tables/predictions_preview", df_predictions.head(n_rows))
-    if tracking.wandb_flag(cfg, "log_predictions"):
+    if tracking.flag(cfg, "log_predictions"):
         tracking.log_file_artifact(
             run, name=f"{artifact_name}-predictions", artifact_type="predictions",
             file_path=s["predictions"], description="Batch inference outputs",
@@ -379,7 +379,7 @@ def main(config_path: Optional[Path] = None) -> None:
     Why: one entry point for CI (dvc repro), teammates and the grader; the quality gate sits before
     save_model, so a weak model is never saved, registered or deployed
     """
-    # Secrets (for example WANDB_API_KEY) come from .env, never from config.yaml
+    # Secrets (for example the tracker API key) come from .env, never from config.yaml
     load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
     cfg = load_config(config_path or PROJECT_ROOT / "config.yaml")
     s = read_settings(cfg)

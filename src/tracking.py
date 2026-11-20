@@ -2,11 +2,17 @@
 """
 Educational Goal:
 - Why this module exists in an MLOps system: Keep experiment tracking (Weights & Biases, W&B)
-  in one place so main.py reads like a recipe, not like a W&B tutorial
+  in one place so main.py and api.py read like a recipe, not like a W&B tutorial
 - Responsibility (separation of concerns): Start and finish W&B runs, log metrics, tables,
-  plots and file artifacts. No training or evaluation logic
+  plots, file artifacts and prediction batches. No training or evaluation logic
 - Pipeline contract: Every function accepts run=None and then does nothing.
   This is how the pipeline runs with W&B switched off (wandb.enabled: false or WANDB_MODE=disabled)
+- Reading the registry (resolve "prod", download the model) lives in src/registry.py
+
+Backend contract (swap W&B for another tracker by replacing this file and src/registry.py only)
+- start_run, finish_run, log_metrics, log_table, log_file_artifact, log_classification_plots,
+  log_prediction_batch, flag, setting: same names, same inputs, same "None means do nothing" rule
+- main.py and api.py never import the tracker's library
 
 Teaching note
 - Tracking is optional infrastructure. The pipeline must never fail because tracking is off
@@ -229,7 +235,29 @@ def finish_run(run: Optional[Any], exit_code: int = 0) -> None:
     run.finish(exit_code=exit_code)
 
 
-def wandb_flag(cfg: Dict[str, Any], key: str, default: bool = False) -> bool:
+def log_prediction_batch(cfg: Dict[str, Any], rows: List[Dict[str, Any]]) -> None:
+    """
+    Send one batch of API prediction rows to W&B, as a Table in its own run (job_type inference-batch)
+
+    Inputs
+    - cfg: config.yaml (wandb.project); rows: prediction rows buffered by the API
+
+    Outputs
+    - None. Never raises: monitoring must not break serving
+    """
+    if not rows or os.getenv("WANDB_MODE", "").lower() == "disabled":
+        return
+    try:
+        run = wandb.init(entity=os.getenv("WANDB_ENTITY") or None, project=setting(cfg, "project", "mlops-project"),
+                         job_type="inference-batch", reinit=True)
+        run.log({"inference_logs": wandb.Table(dataframe=pd.DataFrame(rows))})
+        run.finish()
+        logger.info("Flushed %s prediction logs to W&B", len(rows))
+    except Exception as e:
+        logger.error("Failed to flush prediction logs to W&B: %s", e)
+
+
+def flag(cfg: Dict[str, Any], key: str, default: bool = False) -> bool:
     """
     Inputs: cfg, key and default
     Outputs: the boolean switch wandb.<key> from config.yaml
@@ -237,7 +265,7 @@ def wandb_flag(cfg: Dict[str, Any], key: str, default: bool = False) -> bool:
     return bool(_wandb_cfg(cfg).get(key, default))
 
 
-def wandb_setting(cfg: Dict[str, Any], key: str, default: Optional[Any] = None) -> Any:
+def setting(cfg: Dict[str, Any], key: str, default: Optional[Any] = None) -> Any:
     """
     Inputs: cfg, key and default
     Outputs: the value wandb.<key> from config.yaml, or default

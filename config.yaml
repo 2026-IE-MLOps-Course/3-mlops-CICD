@@ -107,9 +107,9 @@ run:
   include_proba_if_classification: true
 
 api:
-  # Number of predictions buffered before one batch is sent to W&B (Layer 2 monitoring)
-  # 1 means one W&B run per request: easy to demo, but slow and noisy in production
-  wandb_log_batch_size: 20
+  # Number of predictions buffered before one batch is sent to the tracker (Layer 2 monitoring)
+  # 1 means one tracker run per request: easy to demo, but slow and noisy in production
+  log_batch_size: 20
 
 wandb:
   enabled: true

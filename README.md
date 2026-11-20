@@ -149,7 +149,8 @@ load -> clean -> validate -> split -> feature recipe -> train -> calibrate
 | `src/train.py` | Fit the pipeline on the train split only, optional calibration |
 | `src/evaluate.py` | Metrics and the model quality gate |
 | `src/infer.py` | Predictions with a fixed output schema |
-| `src/tracking.py` | Weights & Biases (W&B) runs, metrics, artifacts. Safe no-op when disabled |
+| `src/tracking.py` | Writes to Weights & Biases (W&B): runs, metrics, plots, artifacts, API prediction batches. Safe no-op when disabled |
+| `src/registry.py` | Reads the W&B registry: alias `prod` -> concrete version -> model file. Used by the API and the release |
 | `src/logger.py` | One logging setup for the whole process |
 | `src/main.py` | Orchestrator: the single entry point `python -m src.main` |
 | `src/api.py` | FastAPI service. Reuses clean, validate, infer. No new ML logic |
@@ -220,7 +221,9 @@ The model is logged **only after the quality gate passes**, so every version in 
 
 **Rollback:** redeploy the previous release (Actions > "CD - Deploy to Render" > Run workflow > tag). Code and model roll back together because they are one image. Then move `prod` back to the version that release carries (its `/health` shows it), so the next release does not ship the rolled-back model again.
 
-Local development can follow the alias instead of a file: set `MODEL_SOURCE=wandb` in `.env` and the API downloads the version that carries `WANDB_MODEL_ALIAS` (default `prod`) at startup. `scripts/fetch_prod_model.py` does the same download on its own (read-only) and prints the concrete version.
+Local development can follow the alias instead of a file: set `MODEL_SOURCE=wandb` in `.env` and the API downloads the version that carries `WANDB_MODEL_ALIAS` (default `prod`) at startup. `scripts/fetch_prod_model.py` does the same download on its own (read-only) and prints the concrete version. Both use `src/registry.py`, so they always resolve the alias the same way.
+
+**Where W&B lives:** only in `src/tracking.py` (writes) and `src/registry.py` (reads). `main.py`, `api.py` and `scripts/fetch_prod_model.py` never import `wandb`. To use another tracker with a model registry (for example MLflow), replace those two files, keeping the function names listed at the top of each, then update `environment.yml` and `conda-lock.yml`, the `wandb` section of `config.yaml`, `.env.example`, and the secrets in `deploy.yml`.
 
 ---
 
@@ -390,7 +393,7 @@ Free Render services sleep after inactivity. The first request can take about a 
 ├── docs/DEMO.md                   # 10-minute class demo script (screenshots in docs/demo/)
 ├── notebooks/                     # exploration only, imports from src/
 ├── scripts/
-│   ├── fetch_prod_model.py        # W&B alias prod -> concrete version -> models/model.joblib
+│   ├── fetch_prod_model.py        # alias prod -> concrete version -> models/model.joblib (via src/registry.py)
 │   ├── smoke_test.py              # checks a running API (local, Docker, Render)
 │   └── sample_request.json
 ├── src/                           # production code (see section 4)
@@ -441,6 +444,7 @@ Added and changed:
 - `/health` and `/predict` report the concrete `model_version`; `git_commit` reads `GIT_COMMIT`, then `RENDER_GIT_COMMIT`
 - `deploy.yml`: guard (tag on `main`) -> CI on the tag -> build, smoke-test and push the image -> Render deploys that image -> live smoke test; manual run with a tag rolls back
 - W&B runs record `lineage.git_commit` and `lineage.raw_data_md5`
+- W&B code only in `src/tracking.py` (writes, now also API prediction batches) and the new `src/registry.py` (reads, shared by the API and `fetch_prod_model.py`); helpers `tracking.flag` and `tracking.setting` (were `wandb_flag`, `wandb_setting`); config key `api.log_batch_size` (was `api.wandb_log_batch_size`)
 - CI: 90 % branch coverage floor; DVC installed from `conda-lock.yml`; the CI model is no longer uploaded (`gated-model` artifact removed)
 - Removed `GET /ui` and `src/static/index.html`: `/docs` is the only UI
 - Tests renamed `test_unit_*` and `test_integration_*`; 100 % branch coverage of `src/`

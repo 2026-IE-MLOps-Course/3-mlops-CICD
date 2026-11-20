@@ -4,7 +4,8 @@ Educational Goal:
 - Turn the trained ML pipeline into a minimal web product using FastAPI
 - Use Pydantic to enforce a strict data contract (types and required fields)
 - Reuse existing pipeline modules to prevent training-serving skew
-- Add lightweight observability: request logs (Layer 1) and batched prediction logs to W&B (Layer 2)
+- Add lightweight observability: request logs (Layer 1) and batched prediction logs to the tracker (Layer 2)
+- The tracker's library is never imported here: registry reads live in src/registry.py, writes in src/tracking.py
 
 Key principle
 - NO NEW ML LOGIC IN THIS FILE
@@ -17,6 +18,7 @@ Run it locally
 
 import logging
 import os
+import tempfile
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -26,11 +28,11 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 import joblib
 import pandas as pd
-import wandb
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from src import registry, tracking
 from src.clean_data import clean_dataframe
 from src.config import get_feature_columns, load_config, require_section, require_str, resolve_repo_path
 from src.infer import run_inference
@@ -120,37 +122,27 @@ class HealthResponse(BaseModel):
 
 
 # -------------------------------------------------------------------
-# 2) Model loading (local file or W&B Model Registry)
+# 2) Model loading (local file or the model registry)
 # -------------------------------------------------------------------
-def _load_from_wandb(cfg: Dict[str, Any]) -> Tuple[Any, str]:
+def _load_from_registry(cfg: Dict[str, Any]) -> Tuple[Any, str]:
     """
     Download the registry version that carries the alias (local development only)
 
     Inputs
-    - cfg: config.yaml (wandb.project, wandb.model_artifact_name, paths.model_artifact)
+    - cfg: config.yaml (registry names and paths.model_artifact)
 
     Outputs
     - (model, model_version), where model_version is concrete, e.g. "opioid_classification_model:v7"
 
     Why it matters
     - The alias "prod" moves; logging the resolved version says exactly which model answered
+    - src/registry.py resolves the alias exactly as the release workflow does
     """
-    entity = os.getenv("WANDB_ENTITY")
-    alias = os.getenv("WANDB_MODEL_ALIAS", "prod")
-    wandb_cfg = cfg.get("wandb") or {}
-    project = wandb_cfg.get("project")
-    artifact_name = wandb_cfg.get("model_artifact_name")
-    if not entity or not project or not artifact_name:
-        raise ValueError("MODEL_SOURCE=wandb needs WANDB_ENTITY (.env) plus wandb.project and "
-                         "wandb.model_artifact_name (config.yaml)")
-
-    artifact_path = f"{entity}/{project}/{artifact_name}:{alias}"
-    logger.info("Downloading model from W&B registry: %s", artifact_path)
-    # wandb reads WANDB_API_KEY from the environment automatically
-    artifact = wandb.Api().artifact(artifact_path)
-    artifact_dir = artifact.download()
-    model_path = Path(artifact_dir) / Path(require_str(require_section(cfg, "paths"), "model_artifact")).name
-    return joblib.load(model_path), f"{artifact_name}:{artifact.version}"
+    with tempfile.TemporaryDirectory() as tmp:
+        model_path = Path(tmp) / "model.joblib"
+        version = registry.download_by_alias(cfg, None, model_path)
+        logger.info("Loaded model from the registry: %s", version)
+        return joblib.load(model_path), version
 
 
 def _load_model(cfg: Dict[str, Any]) -> Tuple[Any, str]:
@@ -159,16 +151,17 @@ def _load_model(cfg: Dict[str, Any]) -> Tuple[Any, str]:
 
     Inputs
     - cfg: config.yaml as a dictionary
-    - Environment: MODEL_SOURCE=local (default, the release image) or wandb (local development)
+    - Environment: MODEL_SOURCE=local (default, the release image) or registry.SOURCE_NAME, here
+      "wandb" (local development)
 
     Outputs
     - (model, model_version)
       local: models/model.joblib, version from MODEL_VERSION (baked into the image at release time)
-      wandb: the artifact with alias WANDB_MODEL_ALIAS (default "prod"), version resolved by W&B
+      registry: the version with alias WANDB_MODEL_ALIAS (default "prod"), resolved by src/registry.py
     """
     model_source = os.getenv("MODEL_SOURCE", "local").strip().lower()
-    if model_source == "wandb":
-        return _load_from_wandb(cfg)
+    if model_source == registry.SOURCE_NAME:
+        return _load_from_registry(cfg)
 
     model_path = resolve_repo_path(PROJECT_ROOT, require_str(require_section(cfg, "paths"), "model_artifact"))
     logger.info("Loading local model artifact: %s", model_path)
@@ -261,47 +254,24 @@ async def log_requests(request: Request, call_next: Callable[[Request], Awaitabl
     return response
 
 
-# Layer 2: prediction rows are buffered and sent to W&B in batches (a Table per batch)
+# Layer 2: prediction rows are buffered and sent to the tracker in batches (src/tracking.py)
 LOG_BUFFER: List[Dict[str, Any]] = []
 BUFFER_LOCK = Lock()  # protects the buffer when requests arrive at the same time
 
 
-def flush_logs_to_wandb(batch_data: List[Dict[str, Any]], project_name: str) -> None:
-    """
-    Send one batch of prediction logs to W&B
-
-    Inputs
-    - batch_data: prediction rows; project_name: W&B project
-
-    Outputs
-    - None. Never raises: monitoring must not break serving
-    """
-    if not batch_data or os.getenv("WANDB_MODE", "").lower() == "disabled":
-        return
-    try:
-        run = wandb.init(entity=os.getenv("WANDB_ENTITY") or None, project=project_name,
-                         job_type="inference-batch", reinit=True)
-        run.log({"inference_logs": wandb.Table(dataframe=pd.DataFrame(batch_data))})
-        run.finish()
-        logger.info("Flushed %s prediction logs to W&B", len(batch_data))
-    except Exception as e:
-        logger.error("Failed to flush prediction logs to W&B: %s", e)
-
-
 def _flush_buffer(cfg: Dict[str, Any], force: bool = False,
                   background_tasks: Optional[BackgroundTasks] = None) -> None:
-    """Send the buffer once it reaches api.wandb_log_batch_size (or always when force=True)."""
-    batch_size = int((cfg.get("api") or {}).get("wandb_log_batch_size", 20))
-    project = (cfg.get("wandb") or {}).get("project", "mlops-project")
+    """Send the buffer once it reaches api.log_batch_size (or always when force=True)."""
+    batch_size = int((cfg.get("api") or {}).get("log_batch_size", 20))
     with BUFFER_LOCK:
         if not LOG_BUFFER or (len(LOG_BUFFER) < batch_size and not force):
             return
         batch = LOG_BUFFER.copy()
         LOG_BUFFER.clear()
     if background_tasks is not None:
-        background_tasks.add_task(flush_logs_to_wandb, batch, project)
+        background_tasks.add_task(tracking.log_prediction_batch, cfg, batch)
     else:
-        flush_logs_to_wandb(batch, project)
+        tracking.log_prediction_batch(cfg, batch)
 
 
 # -------------------------------------------------------------------
@@ -373,7 +343,7 @@ def predict(req: PredictRequest, request: Request, background_tasks: BackgroundT
     """
     Inputs
     - req: validated batch of PatientRecord (422 before this runs if the contract is broken)
-    - request: carries the correlation ID; background_tasks: sends W&B logs after the response
+    - request: carries the correlation ID; background_tasks: sends prediction logs after the response
 
     Outputs
     - One PredictionItem per record plus the concrete model_version

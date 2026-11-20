@@ -8,11 +8,10 @@ Notes
 - We MUST use `with TestClient(app) as client:` so the API lifespan (startup) runs
 - To test predictions without depending on the real model file, we train a tiny model in a fixture
   and place it in app.state, exactly where the lifespan would put it
-- W&B is replaced by small fake objects: no network, no account
+- The registry and the tracker are replaced by small fakes: no network, no account
 """
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import joblib
 import pandas as pd
@@ -100,53 +99,32 @@ def test_unit_local_loader_fails_without_model_file(cfg_with_model, tmp_path):
         api_module._load_model(cfg_with_model)
 
 
-def test_unit_wandb_loader_needs_entity(cfg_with_model, monkeypatch):
+def test_unit_registry_loader_needs_entity(cfg_with_model, monkeypatch):
     monkeypatch.setenv("MODEL_SOURCE", "wandb")
     with pytest.raises(ValueError, match="WANDB_ENTITY"):
         api_module._load_model(cfg_with_model)
 
 
-def test_unit_wandb_loader_resolves_alias_to_concrete_version(cfg_with_model, monkeypatch, tmp_path):
-    joblib.dump("model-object", tmp_path / "model.joblib")
-    requested = []
+def test_unit_registry_loader_returns_model_and_concrete_version(cfg_with_model, monkeypatch):
+    calls = []
 
-    class FakeApi:
-        def artifact(self, path):
-            requested.append(path)
-            return SimpleNamespace(version="v7", download=lambda: str(tmp_path))
+    def fake_download(cfg, alias, output, api=None):
+        calls.append(alias)
+        joblib.dump("model-object", output)
+        return "opioid_classification_model:v7"
 
     monkeypatch.setenv("MODEL_SOURCE", "wandb")
-    monkeypatch.setenv("WANDB_ENTITY", "team")
-    monkeypatch.setattr(api_module.wandb, "Api", FakeApi)
+    monkeypatch.setattr(api_module.registry, "download_by_alias", fake_download)
 
     model, version = api_module._load_model(cfg_with_model)
-    assert requested == ["team/opioid-risk-classification/opioid_classification_model:prod"]
+    assert calls == [None]  # None: src/registry.py reads WANDB_MODEL_ALIAS (default prod)
     assert (model, version) == ("model-object", "opioid_classification_model:v7")
-
-
-def test_unit_flush_logs_is_safe_when_disabled_failing_or_working(monkeypatch):
-    api_module.flush_logs_to_wandb([{"a": 1}], "p")  # WANDB_MODE=disabled: returns at once
-    monkeypatch.setenv("WANDB_MODE", "online")
-    api_module.flush_logs_to_wandb([], "p")  # nothing to send
-
-    logged = []
-    fake_run = SimpleNamespace(log=logged.append, finish=lambda: None)
-    monkeypatch.setattr(api_module.wandb, "init", lambda **kwargs: fake_run)
-    monkeypatch.setattr(api_module.wandb, "Table", lambda dataframe: len(dataframe))
-    api_module.flush_logs_to_wandb([{"a": 1}, {"a": 2}], "p")
-    assert logged == [{"inference_logs": 2}]
-
-    def _offline(**kwargs):
-        raise RuntimeError("no network")
-
-    monkeypatch.setattr(api_module.wandb, "init", _offline)
-    api_module.flush_logs_to_wandb([{"a": 1}], "p")  # logs the error, never raises
 
 
 def test_unit_buffer_flushes_at_batch_size_inline_or_in_background(monkeypatch):
     sent = []
-    monkeypatch.setattr(api_module, "flush_logs_to_wandb", lambda batch, project: sent.append(len(batch)))
-    cfg = {"api": {"wandb_log_batch_size": 2}, "wandb": {"project": "p"}}
+    monkeypatch.setattr(api_module.tracking, "log_prediction_batch", lambda cfg, batch: sent.append(len(batch)))
+    cfg = {"api": {"log_batch_size": 2}, "wandb": {"project": "p"}}
     api_module.LOG_BUFFER[:] = [{"a": 1}]
     api_module._flush_buffer(cfg)
     assert sent == [] and len(api_module.LOG_BUFFER) == 1  # below the batch size

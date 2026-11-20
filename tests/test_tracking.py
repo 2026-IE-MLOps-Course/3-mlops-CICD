@@ -72,10 +72,10 @@ def test_unit_helpers_are_no_ops_without_a_run(tmp_path: Path):
 
 
 def test_unit_settings_have_safe_defaults():
-    assert tracking.wandb_flag({}, "log_predictions") is False
-    assert tracking.wandb_flag({"wandb": "not a mapping"}, "log_predictions") is False
-    assert tracking.wandb_setting({"wandb": {"project": "p"}}, "project") == "p"
-    assert tracking.wandb_setting({}, "missing", "default") == "default"
+    assert tracking.flag({}, "log_predictions") is False
+    assert tracking.flag({"wandb": "not a mapping"}, "log_predictions") is False
+    assert tracking.setting({"wandb": {"project": "p"}}, "project") == "p"
+    assert tracking.setting({}, "missing", "default") == "default"
 
 
 def test_unit_dvc_pointer_md5_reads_pointer_or_reports_unknown(tmp_path: Path):
@@ -163,3 +163,28 @@ def test_integration_logging_helpers_send_metrics_tables_artifacts_and_plots(fak
     keys = {k for entry in run.logged for k in entry}
     assert {"plots/roc_curve_val_s", "plots/confusion_matrix_val_s", "tables/calibration_val_s"} <= keys
     assert run.exit_code == 1
+
+
+def test_unit_prediction_batch_is_safe_when_disabled_failing_or_working(monkeypatch):
+    cfg = {"wandb": {"project": "p"}}
+    tracking.log_prediction_batch(cfg, [{"a": 1}])  # WANDB_MODE=disabled (conftest): returns at once
+    monkeypatch.setenv("WANDB_MODE", "online")
+    tracking.log_prediction_batch(cfg, [])  # nothing to send
+
+    logged, projects = [], []
+    fake_run = SimpleNamespace(log=logged.append, finish=lambda: None)
+
+    def _init(**kwargs):
+        projects.append(kwargs["project"])
+        return fake_run
+
+    monkeypatch.setattr(tracking.wandb, "init", _init)
+    monkeypatch.setattr(tracking.wandb, "Table", lambda dataframe: len(dataframe))
+    tracking.log_prediction_batch(cfg, [{"a": 1}, {"a": 2}])
+    assert logged == [{"inference_logs": 2}] and projects == ["p"]
+
+    def _offline(**kwargs):
+        raise RuntimeError("no network")
+
+    monkeypatch.setattr(tracking.wandb, "init", _offline)
+    tracking.log_prediction_batch(cfg, [{"a": 1}])  # logs the error, never raises
