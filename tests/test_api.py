@@ -100,6 +100,7 @@ def test_unit_local_loader_fails_without_model_file(cfg_with_model, tmp_path):
 
 
 def test_unit_registry_loader_needs_entity(cfg_with_model, monkeypatch):
+    monkeypatch.delenv("WANDB_ENTITY", raising=False)
     monkeypatch.setenv("MODEL_SOURCE", "wandb")
     with pytest.raises(ValueError, match="WANDB_ENTITY"):
         api_module._load_model(cfg_with_model)
