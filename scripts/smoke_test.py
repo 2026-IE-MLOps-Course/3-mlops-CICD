@@ -5,12 +5,14 @@ Smoke test for a running API (local, Docker or Render)
 What it checks
 1. GET /health returns 200 (model loaded)
 2. Optional: /health reports the expected git commit (proves the NEW release is live)
+   and the expected model version (proves the image carries the promoted model)
 3. POST /predict with scripts/sample_request.json returns 200 and one prediction per record
 
 Usage
 - Local:   python scripts/smoke_test.py --url http://127.0.0.1:8000
 - Render:  python scripts/smoke_test.py --url https://<your-service>.onrender.com
 - CI/CD:   python scripts/smoke_test.py --url "$RENDER_SERVICE_URL" --expect-commit "$GITHUB_SHA" --timeout 1200
+           [--expect-model-version opioid_classification_model:v7]
 
 Only the Python standard library is used, so it runs anywhere without installing packages
 """
@@ -61,13 +63,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Smoke test the prediction API")
     parser.add_argument("--url", required=True, help="Base URL, e.g. http://127.0.0.1:8000")
     parser.add_argument("--expect-commit", default="", help="Git SHA that /health must report (optional)")
+    parser.add_argument("--expect-model-version", default="",
+                        help="model_version that /health must report, e.g. opioid_classification_model:v7 (optional)")
     parser.add_argument("--timeout", type=int, default=120, help="Seconds to wait for a healthy service")
     parser.add_argument("--interval", type=int, default=15, help="Seconds between /health checks")
     args = parser.parse_args()
     base_url = args.url.rstrip("/")
 
     health = wait_until_healthy(base_url, args.expect_commit, args.timeout, args.interval)
-    print(f"Healthy | model_version={health.get('model_version')}")
+    print(f"Healthy | model_version={health.get('model_version')} | git_commit={health.get('git_commit')}")
+    if args.expect_model_version and health.get("model_version") != args.expect_model_version:
+        sys.exit(f"FAILED: expected model_version {args.expect_model_version}, got {health.get('model_version')}")
 
     payload = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
     status, body = _request(f"{base_url}/predict", payload)

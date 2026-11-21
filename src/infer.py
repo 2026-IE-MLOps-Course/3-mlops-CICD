@@ -10,32 +10,25 @@ Educational Goal:
 """
 
 import logging
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 
-def run_inference(model, X_infer: pd.DataFrame, *, include_proba: bool = False) -> pd.DataFrame:
+def _check_inputs(model: Any, X_infer: pd.DataFrame) -> None:
     """
-    Executes model predictions on new, unseen data.
+    Fail fast before predicting
 
-    Inputs:
-    - model: Fitted scikit-learn compatible artifact with a .predict() method
-    - X_infer: Pandas DataFrame of inference features
-    - include_proba: If True, attempts to return the probability of the positive class.
+    Inputs
+    - model: the loaded artifact
+    - X_infer: features for the new rows
 
-    Outputs:
-    - df_pred: DataFrame containing 'prediction' and optionally 'proba', retaining the original index.
-
-    Why this contract matters for reliable ML delivery:
-    - A consistent schema reduces downstream integration risk for APIs or batch jobs.
-    - Preserving the index allows predictions to be joined back to the original database records.
-    - Defensive shape checking on probabilities prevents silent downstream crashes.
+    Outputs
+    - None. Raises ValueError (empty data) or TypeError (wrong object types)
     """
-    logger.info("Running inference")
-
-    # 1) Fail-fast structural guardrails
     if X_infer is None or len(X_infer) == 0:
         raise ValueError("Fatal: X_infer is empty. Cannot run inference.")
 
@@ -43,35 +36,62 @@ def run_inference(model, X_infer: pd.DataFrame, *, include_proba: bool = False) 
         raise TypeError(
             f"Fatal: X_infer must be a pandas DataFrame to retain feature names. Got type={type(X_infer)}")
 
-    # Enforce Pipeline Contract: The artifact must be able to predict
     if not hasattr(model, "predict"):
-        raise TypeError(
-            f"Fatal: model must implement predict(), got type={type(model)}")
+        raise TypeError(f"Fatal: model must implement predict(), got type={type(model)}")
 
-    # 2) Initialize Output DataFrame (Preserving the index for downstream joins)
+
+def _positive_probability(model: Any, X_infer: pd.DataFrame) -> np.ndarray:
+    """
+    Inputs
+    - model: fitted classifier
+    - X_infer: features for the new rows
+
+    Outputs
+    - Probability of the positive class (OD=1), one float per row
+
+    Why it matters
+    - Defensive shape checks stop a wrong artifact from producing silently shifted scores
+    """
+    if not hasattr(model, "predict_proba"):
+        raise TypeError("Fatal: include_proba=True but the loaded model does not support predict_proba().")
+
+    proba = model.predict_proba(X_infer)
+
+    if not isinstance(proba, np.ndarray) or proba.ndim != 2 or proba.shape[0] != len(X_infer):
+        raise ValueError(f"Fatal: predict_proba returned an invalid shape. Got {getattr(proba, 'shape', None)}")
+
+    if proba.shape[1] < 2:
+        raise ValueError(
+            f"Fatal: predict_proba must return at least 2 columns for binary classification. Got {proba.shape}")
+
+    return proba[:, 1].astype(float)
+
+
+def run_inference(model: Any, X_infer: pd.DataFrame, include_proba: bool = False) -> pd.DataFrame:
+    """
+    Executes model predictions on new, unseen data.
+
+    Inputs:
+    - model: Fitted scikit-learn compatible artifact with a .predict() method
+    - X_infer: Pandas DataFrame of inference features (never modified)
+    - include_proba: If True, adds the probability of the positive class
+
+    Outputs:
+    - df_pred: DataFrame with 'prediction' and optionally 'probability', on the same index as X_infer
+
+    Why this contract matters for reliable ML delivery:
+    - A consistent schema reduces downstream integration risk for APIs or batch jobs.
+    - Preserving the index allows predictions to be joined back to the original database records.
+    - Defensive shape checking on probabilities prevents silent downstream crashes.
+    """
+    logger.info("Running inference")
+    _check_inputs(model, X_infer)
+
+    # Preserve the index for downstream joins
     df_pred = pd.DataFrame(index=X_infer.index)
-
-    # 3) Execute Inference
     df_pred["prediction"] = model.predict(X_infer)
 
-    # 4) Optionally attach probabilities (Critical for risk-scoring models like OD)
     if include_proba:
-        if not hasattr(model, "predict_proba"):
-            raise TypeError(
-                "Fatal: include_proba=True but the loaded model does not support predict_proba().")
-
-        proba = model.predict_proba(X_infer)
-
-        # Defensive MLOps: Ensure the model returned a valid 2D array matching our row count
-        if not isinstance(proba, np.ndarray) or proba.ndim != 2 or proba.shape[0] != len(X_infer):
-            raise ValueError(
-                f"Fatal: predict_proba returned an invalid shape. Got {getattr(proba, 'shape', None)}")
-
-        # Ensure we actually have a second column (index 1) representing the positive class (OD=1)
-        if proba.shape[1] < 2:
-            raise ValueError(
-                f"Fatal: predict_proba must return at least 2 columns for binary classification. Got {proba.shape}")
-
-        df_pred["proba"] = proba[:, 1].astype(float)
+        df_pred["probability"] = _positive_probability(model, X_infer)
 
     return df_pred

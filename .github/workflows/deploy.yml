@@ -1,15 +1,20 @@
-# deploy.yml: Continuous Deployment (CD), ship a release to Render
-# A PERSON decides when to release (publish a GitHub Release). Automation decides how:
-#   1. rerun the full CI on the released commit
-#   2. ask Render to deploy exactly that commit (deploy hook + ?ref=<sha>)
-#   3. smoke test: wait until /health reports the new commit, then call /predict
-#   4. in parallel, publish the serving image to GitHub Container Registry (ghcr.io)
-#      tagged with the release version and the commit, as a traceable release artifact
-# Rollback: Actions > "CD - Deploy to Render" > Run workflow > type an older tag
+# deploy.yml: Continuous Deployment (CD), "promote with a label, ship with a release"
+# A PERSON decides WHAT model ships (moves the W&B alias prod) and WHEN (publishes a GitHub Release from main).
+# Automation decides HOW:
+#   guard          the release tag must be on main (release-guard.yml)
+#   ci             rerun the full CI on the tag (ci.yml)
+#   publish-image  resolve prod to a concrete version (e.g. opioid_classification_model:v7), bake it into ONE
+#                  image with the code, smoke test the container, push it to ghcr.io (X.Y.Z, X.Y, latest, sha-abc1234)
+#   deploy         Render (image-backed service) deploys THAT image; smoke test the live URL
+# The model CI trains is reproducibility evidence only; it is never shipped
 #
-# One-time setup (see README section 9)
-#   Secret   RENDER_DEPLOY_HOOK_URL  (Render > Settings > Deploy Hook, treat it like a password)
-#   Variable RENDER_SERVICE_URL      (e.g. https://<your-service>.onrender.com)
+# Rollback: Actions > "CD - Deploy to Render" > Run workflow > tag (e.g. v3.0.0)
+#   skips guard, ci and publish-image and redeploys the existing image ghcr.io/<owner>/<repo>:3.0.0
+#   (code and model roll back together); then move prod back in W&B so the next release does not re-ship it
+#
+# One-time setup (README section 9)
+#   Secrets    RENDER_DEPLOY_HOOK_URL, WANDB_API_KEY (and DAGSHUB_TOKEN for ci.yml)
+#   Variables  RENDER_SERVICE_URL, WANDB_ENTITY (and DAGSHUB_USER for ci.yml)
 
 name: CD - Deploy to Render
 
@@ -19,13 +24,13 @@ on:
     workflow_dispatch:
         inputs:
             tag:
-                description: "Release tag to deploy (an older tag rolls back)"
+                description: "Release tag to redeploy (rollback), e.g. v3.0.0"
                 required: true
+                type: string
 
-# Least privilege; packages: write lets the built-in GITHUB_TOKEN push the image
+# Least privilege: read-only by default; only publish-image may write packages
 permissions:
     contents: read
-    packages: write
 
 # Never run two deploys at the same time
 concurrency:
@@ -33,38 +38,95 @@ concurrency:
     cancel-in-progress: false
 
 jobs:
+    guard:
+        if: github.event_name == 'release'
+        uses: ./.github/workflows/release-guard.yml
+        with:
+            tag: ${{ github.event.release.tag_name }}
+
     ci:
+        needs: guard
+        if: github.event_name == 'release'
         uses: ./.github/workflows/ci.yml
         with:
-            ref: ${{ github.event.release.tag_name || inputs.tag }}
+            ref: ${{ github.event.release.tag_name }}
+        secrets:
+            DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
 
-    # Releases only: a manual rollback redeploys an old tag and needs no new image
     publish-image:
-        needs: ci
+        needs: [guard, ci]
         if: github.event_name == 'release'
         runs-on: ubuntu-latest
-        timeout-minutes: 30
+        timeout-minutes: 40
+        permissions:
+            contents: read
+            packages: write
+        outputs:
+            version: ${{ steps.meta.outputs.version }}
+            model_version: ${{ steps.model.outputs.MODEL_VERSION }}
         steps:
             - name: Checkout the release
               uses: actions/checkout@v6
               with:
                   ref: ${{ github.event.release.tag_name }}
 
-            - name: Download the gated model from CI
-              uses: actions/download-artifact@v7
-              with:
-                  name: gated-model
-                  path: models
+            - name: Find the commit to ship
+              id: commit
+              run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-            - name: Image tags from the release (2.2.0, 2.2, latest, sha-abc1234)
+            - name: Set up Python
+              uses: actions/setup-python@v6
+              with:
+                  python-version: "3.12"
+
+            # Same wandb version as conda-lock.yml; PyYAML comes with it
+            - name: Resolve W&B alias prod to a concrete version and download it
+              id: model
+              env:
+                  WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+                  WANDB_ENTITY: ${{ vars.WANDB_ENTITY }}
+              run: |
+                  pip install "wandb==0.30.0"
+                  python scripts/fetch_prod_model.py
+
+            - name: Image tags from the release (3.0.0, 3.0, latest, sha-abc1234)
               id: meta
               uses: docker/metadata-action@v6
               with:
                   images: ghcr.io/${{ github.repository }}
+                  flavor: latest=false
                   tags: |
                       type=semver,pattern={{version}},value=${{ github.event.release.tag_name }}
                       type=semver,pattern={{major}}.{{minor}},value=${{ github.event.release.tag_name }}
-                      type=sha
+                      type=raw,value=latest
+                      type=sha,format=short
+
+            - name: Build the release image (code + promoted model), load it locally
+              uses: docker/build-push-action@v7
+              with:
+                  context: .
+                  load: true
+                  push: false
+                  tags: ${{ steps.meta.outputs.tags }}
+                  labels: ${{ steps.meta.outputs.labels }}
+                  build-args: |
+                      MODEL_VERSION=${{ steps.model.outputs.MODEL_VERSION }}
+                      GIT_COMMIT=${{ steps.commit.outputs.sha }}
+
+            # The exact image that will be pushed must answer /health and /predict BEFORE it is pushed
+            - name: Smoke test the container
+              env:
+                  IMAGE: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+                  SHA: ${{ steps.commit.outputs.sha }}
+                  MODEL_VERSION: ${{ steps.model.outputs.MODEL_VERSION }}
+              run: |
+                  docker run -d --name api -p 8000:8000 "$IMAGE"
+                  python scripts/smoke_test.py --url http://127.0.0.1:8000 --expect-commit "$SHA" \
+                      --expect-model-version "$MODEL_VERSION" --timeout 180 --interval 5
+
+            - name: Container logs (on failure)
+              if: failure()
+              run: docker logs api || true
 
             - name: Log in to GitHub Container Registry
               uses: docker/login-action@v4
@@ -73,16 +135,19 @@ jobs:
                   username: ${{ github.actor }}
                   password: ${{ secrets.GITHUB_TOKEN }}
 
-            - name: Build and push the serving image
-              uses: docker/build-push-action@v7
-              with:
-                  context: .
-                  push: true
-                  tags: ${{ steps.meta.outputs.tags }}
-                  labels: ${{ steps.meta.outputs.labels }}
+            - name: Push every release tag of the tested image
+              env:
+                  TAGS: ${{ steps.meta.outputs.tags }}
+              run: |
+                  for tag in $TAGS; do docker push "$tag"; done
+                  echo "### Released image" >> "$GITHUB_STEP_SUMMARY"
+                  echo "$TAGS" | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY"
+                  echo "- model: ${{ steps.model.outputs.MODEL_VERSION }}" >> "$GITHUB_STEP_SUMMARY"
 
     deploy:
-        needs: ci
+        needs: [ci, publish-image]
+        # Release: runs after a successful publish. Rollback (workflow_dispatch): guard, ci and publish are skipped
+        if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.publish-image.result == 'success') }}
         runs-on: ubuntu-latest
         timeout-minutes: 30
         steps:
@@ -94,33 +159,39 @@ jobs:
                   missing=0
                   if [ -z "$HOOK" ]; then echo "::error::Secret RENDER_DEPLOY_HOOK_URL is not set (Settings > Secrets and variables > Actions > Secrets)"; missing=1; fi
                   if [ -z "$SERVICE_URL" ]; then echo "::error::Variable RENDER_SERVICE_URL is not set (Settings > Secrets and variables > Actions > Variables, not Secrets)"; missing=1; fi
-                  case "$SERVICE_URL" in http://*|https://*|"") ;; *) echo "::error::RENDER_SERVICE_URL must start with https://"; missing=1;; esac
+                  case "$SERVICE_URL" in https://*|"") ;; *) echo "::error::RENDER_SERVICE_URL must start with https://"; missing=1;; esac
                   exit $missing
 
-            - name: Checkout the release
+            - name: Checkout the tag being deployed
               uses: actions/checkout@v6
               with:
                   ref: ${{ github.event.release.tag_name || inputs.tag }}
 
-            - name: Find the commit to deploy
-              id: commit
-              run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            # ghcr.io names must be lowercase; the image tag is the release tag without the leading v
+            - name: Image and commit for this tag
+              id: target
+              env:
+                  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+                  REPO: ${{ github.repository }}
+              run: |
+                  echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+                  echo "image=ghcr.io/${REPO,,}:${TAG#v}" >> "$GITHUB_OUTPUT"
 
-            - name: Trigger the Render deploy for this exact commit
+            - name: Ask Render to deploy this exact image
               env:
                   HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+                  IMAGE: ${{ steps.target.outputs.image }}
               run: |
-                  curl --fail --silent --show-error -X POST "${HOOK}&ref=${{ steps.commit.outputs.sha }}"
+                  encoded="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$IMAGE")"
+                  echo "Deploying $IMAGE"
+                  curl --fail --silent --show-error -X POST "${HOOK}&imgURL=${encoded}" > /dev/null
 
-            - name: Set up Python
-              uses: actions/setup-python@v6
-              with:
-                  python-version: "3.12"
-
-            # Free Render services sleep and builds take minutes, hence the long timeout
+            # Free Render services sleep and image pulls take minutes, hence the long timeout
             - name: Smoke test the live API
-              run: >
-                  python scripts/smoke_test.py
-                  --url "${{ vars.RENDER_SERVICE_URL }}"
-                  --expect-commit "${{ steps.commit.outputs.sha }}"
-                  --timeout 1200
+              env:
+                  SERVICE_URL: ${{ vars.RENDER_SERVICE_URL }}
+                  SHA: ${{ steps.target.outputs.sha }}
+                  MODEL_VERSION: ${{ needs.publish-image.outputs.model_version }}
+              run: |
+                  python3 scripts/smoke_test.py --url "$SERVICE_URL" --expect-commit "$SHA" \
+                      ${MODEL_VERSION:+--expect-model-version "$MODEL_VERSION"} --timeout 1200

@@ -19,20 +19,52 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+def _standardize_headers(df: pd.DataFrame) -> pd.DataFrame:
+    """Strip header whitespace and replace inner spaces with "_" (in place on a copy owned by the caller)."""
+    df.columns = df.columns.astype(str).str.strip().str.replace(" ", "_", regex=False)
+    return df
+
+
+def _resolve_target(df: pd.DataFrame, target_column: str) -> str:
+    """
+    Inputs
+    - df: data with standardized headers
+    - target_column: target name from config.yaml
+
+    Outputs
+    - The target column name as it appears in df (forgiving to case drift, e.g. "od" vs "OD")
+    """
+    target_std = (target_column or "").strip().replace(" ", "_")
+    if not target_std:
+        raise ValueError("target_column is empty after standardization")
+    if target_std in df.columns:
+        return target_std
+
+    cols_lower = {c.lower(): c for c in df.columns}
+    if target_std.lower() in cols_lower:
+        return cols_lower[target_std.lower()]
+    raise ValueError(
+        f"Fatal: target column '{target_column}' missing after cleaning. "
+        "Check problem.target_column in config.yaml and your raw CSV headers"
+    )
+
+
 def clean_dataframe(df_raw: pd.DataFrame, target_column: Optional[str] = None) -> pd.DataFrame:
     """
     One cleaner for both training and inference
 
-    Training mode (target_column provided)
-    - Standardize headers
-    - Drop exact duplicates
-    - Drop rows with missing target
+    Inputs
+    - df_raw: raw DataFrame (never modified)
+    - target_column: target name in training mode, None in inference mode
 
-    Inference mode (target_column None)
-    - Standardize headers only
-    - Never drop rows: every input row must get exactly one prediction
+    Outputs
+    - df_clean: a new DataFrame with standardized headers and a fresh 0..n-1 index
 
-    Where each preparation step belongs
+    Modes
+    - Training (target_column set): standardize headers, drop exact duplicates, drop rows with missing target
+    - Inference (target_column None): standardize headers only; never drop rows, every row gets a prediction
+
+    Why: where each preparation step belongs
     - Stateless rules for every row (headers, formats): here, shared by main.py and api.py
     - Row filters (duplicates, missing target): here, training mode only
     - Anything that learns from data (imputation, binning, scaling, encoding): src/features.py,
@@ -41,59 +73,25 @@ def clean_dataframe(df_raw: pd.DataFrame, target_column: Optional[str] = None) -
     logger.info("Cleaning dataframe")
 
     if df_raw is None:
-        raise ValueError(
-            "df_raw is None. Check src/load_data.py and paths.raw_data in config.yaml")
-
+        raise ValueError("df_raw is None. Check src/load_data.py and paths.raw_data in config.yaml")
     if not isinstance(df_raw, pd.DataFrame):
-        raise TypeError(
-            f"df_raw must be a pandas DataFrame, got type={type(df_raw)}")
+        raise TypeError(f"df_raw must be a pandas DataFrame, got type={type(df_raw)}")
 
-    df_clean = df_raw.copy()
+    df_clean = _standardize_headers(df_raw.copy())
     initial_rows = len(df_clean)
-
-    # Standardize headers to keep downstream contracts stable
-    df_clean.columns = (
-        df_clean.columns
-        .astype(str)
-        .str.strip()
-        .str.replace(" ", "_", regex=False)
-    )
 
     if target_column is not None:
         # Row filters are training only: dropping rows at inference would silently lose predictions
-        # This drops exact duplicates across all columns (including ID if present)
-        # If ID is always unique, duplicates will not be removed, which is expected
+        # Exact duplicates across all columns (including ID): a unique ID means no row is dropped
         df_clean = df_clean.drop_duplicates()
-
-        # Standardize target name to match standardized headers
-        target_column_std = (
-            (target_column or "")
-            .strip()
-            .replace(" ", "_")
-        )
-
-        if not target_column_std:
-            raise ValueError("target_column is empty after standardization")
-
-        # Be forgiving to case drift in student datasets
-        cols_lower = {c.lower(): c for c in df_clean.columns}
-        if target_column_std not in df_clean.columns:
-            if target_column_std.lower() in cols_lower:
-                target_column_std = cols_lower[target_column_std.lower()]
-            else:
-                raise ValueError(
-                    f"Fatal: target column '{target_column}' missing after cleaning. "
-                    "Check problem.target_column in config.yaml and your raw CSV headers"
-                )
-
         # Supervised learning requires a target label for every training row
-        df_clean = df_clean.dropna(subset=[target_column_std])
+        df_clean = df_clean.dropna(subset=[_resolve_target(df_clean, target_column)])
 
     df_clean = df_clean.reset_index(drop=True)
 
     dropped_rows = initial_rows - len(df_clean)
     if dropped_rows > 0:
-        logger.info(f"Dropped {dropped_rows} rows")
+        logger.info("Dropped %s rows", dropped_rows)
 
-    logger.info(f"Rows after cleaning: {len(df_clean)}")
+    logger.info("Rows after cleaning: %s", len(df_clean))
     return df_clean

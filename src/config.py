@@ -43,7 +43,11 @@ def load_config(config_path: Path) -> Dict[str, Any]:
 
 
 def require_section(cfg: Dict[str, Any], section: str) -> Dict[str, Any]:
-    """Return a required top-level section, or raise an error that names the missing section."""
+    """
+    Inputs: cfg (whole config) and section (top-level key)
+    Outputs: the section as a dictionary
+    Raises: ValueError naming the missing section, so the fix is obvious
+    """
     value = cfg.get(section)
     if not isinstance(value, dict):
         raise ValueError(f"config.yaml must contain a top-level '{section}' mapping")
@@ -51,7 +55,11 @@ def require_section(cfg: Dict[str, Any], section: str) -> Dict[str, Any]:
 
 
 def require_str(section: Dict[str, Any], key: str) -> str:
-    """Return a non-empty string value from a config section."""
+    """
+    Inputs: section (config mapping) and key
+    Outputs: the stripped, non-empty string value
+    Raises: ValueError when the key is missing, blank or not a string
+    """
     value = section.get(key)
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"config.yaml: '{key}' must be a non-empty string")
@@ -59,7 +67,11 @@ def require_str(section: Dict[str, Any], key: str) -> str:
 
 
 def require_float(section: Dict[str, Any], key: str) -> float:
-    """Return a numeric value from a config section as float."""
+    """
+    Inputs: section (config mapping) and key
+    Outputs: the value as float
+    Raises: ValueError when the value is not a number
+    """
     value = section.get(key)
     try:
         return float(value)
@@ -68,7 +80,11 @@ def require_float(section: Dict[str, Any], key: str) -> float:
 
 
 def require_int(section: Dict[str, Any], key: str) -> int:
-    """Return an integer value from a config section."""
+    """
+    Inputs: section (config mapping) and key
+    Outputs: the value as int
+    Raises: ValueError when the value is not an integer
+    """
     value = section.get(key)
     try:
         return int(value)
@@ -77,7 +93,11 @@ def require_int(section: Dict[str, Any], key: str) -> int:
 
 
 def require_list(section: Dict[str, Any], key: str) -> List[str]:
-    """Return a list of non-empty strings. A missing key returns an empty list."""
+    """
+    Inputs: section (config mapping) and key
+    Outputs: the non-empty strings of the list; a missing key returns an empty list
+    Raises: ValueError when the value is not a list
+    """
     value = section.get(key)
     if value is None:
         return []
@@ -89,6 +109,9 @@ def require_list(section: Dict[str, Any], key: str) -> List[str]:
 def resolve_repo_path(project_root: Path, relative_path: str) -> Path:
     """
     Resolve a config path relative to the repo root
+
+    Inputs: project_root and relative_path (from config.yaml)
+    Outputs: an absolute Path (an absolute relative_path is kept as is)
 
     Why this matters
     - The pipeline behaves the same no matter which folder you run it from

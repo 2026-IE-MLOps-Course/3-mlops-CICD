@@ -1,0 +1,39 @@
+# release-guard.yml: a release may only ship code that is already on main
+# Called by deploy.yml as its first job (guard). Reusable, so the same rule can protect any release workflow
+# Why: a release published from a feature branch tag would skip review and the PR checks on main
+
+name: Release guard
+
+on:
+    workflow_call:
+        inputs:
+            tag:
+                description: "Release tag to check (e.g. v3.0.0)"
+                type: string
+                required: true
+
+permissions:
+    contents: read
+
+jobs:
+    tag-on-main:
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        steps:
+            - name: Checkout with full history (tags and origin/main)
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+
+            # The tag arrives through env, never pasted into the script (no shell injection)
+            - name: Fail unless the tag commit is an ancestor of origin/main
+              env:
+                  TAG: ${{ inputs.tag }}
+              run: |
+                  tag_sha="$(git rev-list -n 1 "refs/tags/${TAG}")"
+                  if git merge-base --is-ancestor "${tag_sha}" origin/main; then
+                      echo "OK: ${TAG} (${tag_sha::7}) is on main"
+                  else
+                      echo "::error::${TAG} (${tag_sha::7}) is not on main. Merge dev into main through a PR, then release from main"
+                      exit 1
+                  fi

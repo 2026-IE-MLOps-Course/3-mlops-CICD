@@ -14,6 +14,7 @@ import logging
 from typing import Any, Dict, Optional
 
 import pandas as pd
+from sklearn.base import BaseEstimator
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import LinearRegression, LogisticRegression
@@ -21,9 +22,92 @@ from sklearn.pipeline import Pipeline
 
 logger = logging.getLogger(__name__)
 
+# problem_type -> (default model_type, {model_type: estimator class})
+SUPPORTED_MODELS: Dict[str, tuple] = {
+    "classification": ("logistic_regression", {"logistic_regression": LogisticRegression}),
+    "regression": ("linear_regression", {"linear_regression": LinearRegression}),
+}
 
-def _normalize_problem_type(problem_type: Optional[str]) -> str:
-    return (problem_type or "").strip().lower()
+# Keys in training.<problem_type> that steer orchestration, not the estimator constructor
+CALIBRATION_KEYS = ("calibration_enabled", "calibration_method", "calibration_cv")
+
+
+def _check_training_data(X_train: pd.DataFrame, y_train: pd.Series, action: str) -> None:
+    """
+    Fail fast on empty or misaligned training data
+
+    Inputs
+    - X_train, y_train: features and target
+    - action: verb used in the error message ("train", "calibrate")
+
+    Outputs
+    - None. Raises ValueError with an actionable message
+    """
+    if X_train is None or len(X_train) == 0:
+        raise ValueError(f"X_train is empty. Cannot {action} a model")
+    if y_train is None or len(y_train) == 0:
+        raise ValueError(f"y_train is empty. Cannot {action} a model")
+    if len(X_train) != len(y_train):
+        raise ValueError(f"X_train rows ({len(X_train)}) do not match y_train rows ({len(y_train)})")
+
+
+def _estimator_params(model_params: Optional[Dict[str, Any]], random_state: Optional[int]) -> Dict[str, Any]:
+    """
+    Turn the config section into constructor arguments
+
+    Inputs
+    - model_params: training.<problem_type> from config.yaml (never mutated)
+    - random_state: seed used when the config does not set one
+
+    Outputs
+    - params: a new dictionary without routing keys (model_type, calibration_*)
+    """
+    params: Dict[str, Any] = dict(model_params) if isinstance(model_params, dict) else {}
+    params.pop("model_type", None)
+    for key in CALIBRATION_KEYS:
+        params.pop(key, None)
+    if random_state is not None:
+        params.setdefault("random_state", random_state)
+    return params
+
+
+def build_estimator(problem_type: str, model_params: Optional[Dict[str, Any]] = None,
+                    random_state: Optional[int] = None) -> BaseEstimator:
+    """
+    Create the unfitted estimator named in config.yaml
+
+    Inputs
+    - problem_type: "classification" or "regression"
+    - model_params: training.<problem_type> from config.yaml, including model_type
+    - random_state: seed for estimators that accept one
+
+    Outputs
+    - An unfitted scikit-learn estimator
+
+    Why it matters
+    - Unknown problem types, model types or hyperparameters fail with a message that names the config key
+    """
+    pt = (problem_type or "").strip().lower()
+    if pt not in SUPPORTED_MODELS:
+        raise ValueError("Unsupported problem_type. Use 'classification' or 'regression'")
+
+    default_type, registry = SUPPORTED_MODELS[pt]
+    model_type = str((model_params or {}).get("model_type") or default_type).strip().lower()
+    if model_type not in registry:
+        raise ValueError(f"Unsupported {pt} model_type '{model_type}'. Supported: {sorted(registry)}")
+
+    estimator_cls = registry[model_type]
+    params = _estimator_params(model_params, random_state)
+    if "random_state" not in estimator_cls().get_params():
+        params.pop("random_state", None)
+
+    try:
+        return estimator_cls(**params)
+    except TypeError as e:
+        raise ValueError(
+            f"Invalid {pt} hyperparameters in config.yaml under training.{pt}. "
+            f"Constructor error: {e}. Fix the keys or remove the unsupported parameter."
+        ) from e
 
 
 def train_model(
@@ -32,89 +116,29 @@ def train_model(
     preprocessor: ColumnTransformer,
     problem_type: str,
     model_params: Optional[Dict[str, Any]] = None,
+    random_state: Optional[int] = None,
 ) -> Pipeline:
     """
-    Train a scikit-learn Pipeline.
+    Train a scikit-learn Pipeline (feature recipe + model) on the training split only
 
     Inputs
     - X_train: Features for training (target removed)
     - y_train: Target values
-    - preprocessor: ColumnTransformer describing the feature recipe
+    - preprocessor: Unfitted ColumnTransformer describing the feature recipe
     - problem_type: "classification" or "regression"
     - model_params: dictionary from config.yaml training.<problem_type>
+    - random_state: seed used when model_params does not set one (estimators that accept it)
 
     Output
-    - A fitted scikit-learn Pipeline artifact
+    - A fitted scikit-learn Pipeline with steps "preprocess" and "model"
     """
     logger.info("Training model pipeline for problem_type=%s", problem_type)
 
-    if X_train is None or len(X_train) == 0:
-        raise ValueError("X_train is empty. Cannot train a model")
-    if y_train is None or len(y_train) == 0:
-        raise ValueError("y_train is empty. Cannot train a model")
-    if len(X_train) != len(y_train):
-        raise ValueError(
-            f"X_train rows ({len(X_train)}) do not match y_train rows ({len(y_train)})"
-        )
+    _check_training_data(X_train, y_train, "train")
     if not isinstance(preprocessor, ColumnTransformer):
-        raise TypeError(
-            f"preprocessor must be a ColumnTransformer. Got type={type(preprocessor)}"
-        )
+        raise TypeError(f"preprocessor must be a ColumnTransformer. Got type={type(preprocessor)}")
 
-    pt = _normalize_problem_type(problem_type)
-
-    # Copy so we never mutate the original config dictionary
-    params: Dict[str, Any] = dict(model_params) if isinstance(
-        model_params, dict) else {}
-
-    # model_type is a routing key, not a constructor argument
-    model_type = str(params.pop("model_type", "") or "").strip().lower()
-
-    # Calibration keys belong to orchestration, not the base estimator constructor
-    params.pop("calibration_enabled", None)
-    params.pop("calibration_method", None)
-    params.pop("calibration_cv", None)
-
-    if pt == "classification":
-        if not model_type:
-            model_type = "logistic_regression"
-
-        if model_type != "logistic_regression":
-            raise ValueError(
-                f"Unsupported classification model_type '{model_type}'. Supported: 'logistic_regression'"
-            )
-
-        try:
-            model = LogisticRegression(**params)
-        except TypeError as e:
-            raise ValueError(
-                "Invalid classification hyperparameters in config.yaml under training.classification. "
-                f"Constructor error: {e}. "
-                "Fix the keys or remove the unsupported parameter."
-            ) from e
-
-    elif pt == "regression":
-        if not model_type:
-            model_type = "linear_regression"
-
-        if model_type != "linear_regression":
-            raise ValueError(
-                f"Unsupported regression model_type '{model_type}'. Supported: 'linear_regression'"
-            )
-
-        try:
-            model = LinearRegression(**params)
-        except TypeError as e:
-            raise ValueError(
-                "Invalid regression hyperparameters in config.yaml under training.regression. "
-                f"Constructor error: {e}. "
-                "Fix the keys or remove the unsupported parameter."
-            ) from e
-
-    else:
-        raise ValueError(
-            "Unsupported problem_type. Use 'classification' or 'regression'")
-
+    model = build_estimator(problem_type, model_params, random_state)
     pipeline = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
     pipeline.fit(X_train, y_train)
 
@@ -128,7 +152,7 @@ def calibrate_pipeline(
     y_train: pd.Series,
     method: str = "sigmoid",
     cv: int = 3,
-):
+) -> CalibratedClassifierCV:
     """
     Calibrate a fitted classification pipeline so predicted probabilities are more reliable.
 
@@ -146,32 +170,19 @@ def calibrate_pipeline(
     - A classifier can rank cases reasonably well but still output poorly calibrated probabilities
     - Calibration is useful when probabilities drive business thresholds, triage, or intervention rules
     """
-    logger.info(
-        "Calibrating model probabilities | method=%s | cv=%s", method, cv)
+    logger.info("Calibrating model probabilities | method=%s | cv=%s", method, cv)
 
     if pipeline is None:
         raise ValueError("pipeline cannot be None for calibration")
-    if X_train is None or len(X_train) == 0:
-        raise ValueError("X_train is empty. Cannot calibrate model")
-    if y_train is None or len(y_train) == 0:
-        raise ValueError("y_train is empty. Cannot calibrate model")
-    if len(X_train) != len(y_train):
-        raise ValueError(
-            f"X_train rows ({len(X_train)}) do not match y_train rows ({len(y_train)})"
-        )
+    _check_training_data(X_train, y_train, "calibrate")
     if not hasattr(pipeline, "predict_proba"):
-        raise TypeError(
-            "pipeline must implement predict_proba() for calibration")
+        raise TypeError("pipeline must implement predict_proba() for calibration")
     if method not in {"sigmoid", "isotonic"}:
         raise ValueError("Calibration method must be 'sigmoid' or 'isotonic'")
     if int(cv) < 2:
         raise ValueError("Calibration cv must be at least 2")
 
-    calibrated_model = CalibratedClassifierCV(
-        estimator=pipeline,
-        method=method,
-        cv=int(cv),
-    )
+    calibrated_model = CalibratedClassifierCV(estimator=pipeline, method=method, cv=int(cv))
     calibrated_model.fit(X_train, y_train)
 
     logger.info("Model calibration completed")
