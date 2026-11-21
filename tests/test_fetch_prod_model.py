@@ -8,6 +8,7 @@ Educational Goal:
 """
 
 import importlib.util
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,6 +40,12 @@ class FakeApi:
         return SimpleNamespace(version=self.version, download=download)
 
 
+@pytest.fixture(autouse=True)
+def isolate_repo_root(tmp_path, monkeypatch):
+    """Keep every script test away from the developer's real .env"""
+    monkeypatch.setattr(fetch, "REPO_ROOT", tmp_path)
+
+
 @pytest.fixture
 def config_file(tmp_path):
     path = tmp_path / "config.yaml"
@@ -63,3 +70,32 @@ def test_integration_main_downloads_model_and_writes_github_output(config_file, 
     assert output.read_text(encoding="utf-8") == "model-bytes"
     assert github_output.read_text(encoding="utf-8") == "MODEL_VERSION=opioid_classification_model:v7\n"
     assert "MODEL_VERSION=opioid_classification_model:v7" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("existing_entity", [None, "ci-team"])
+def test_integration_main_loads_dotenv_without_overriding_environment(
+        config_file, tmp_path, monkeypatch, existing_entity):
+    (tmp_path / ".env").write_text("WANDB_ENTITY=student-team\n", encoding="utf-8")
+    monkeypatch.delenv("WANDB_ENTITY", raising=False)
+    if existing_entity is not None:
+        monkeypatch.setenv("WANDB_ENTITY", existing_entity)
+    api = FakeApi()
+
+    version = fetch.main(["--config", str(config_file)], api=api)
+
+    assert version == "opioid_classification_model:v7"
+    entity = existing_entity or "student-team"
+    assert api.requested == [f"{entity}/opioid-risk-classification/opioid_classification_model:prod"]
+    assert (tmp_path / "out" / "model.joblib").read_text(encoding="utf-8") == "model-bytes"
+
+
+def test_integration_main_works_without_dotenv(config_file, tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "dotenv", None)
+    monkeypatch.setenv("WANDB_ENTITY", "release-team")
+    api = FakeApi()
+
+    version = fetch.main(["--config", str(config_file)], api=api)
+
+    assert version == "opioid_classification_model:v7"
+    assert api.requested == ["release-team/opioid-risk-classification/opioid_classification_model:prod"]
+    assert (tmp_path / "out" / "model.joblib").is_file()

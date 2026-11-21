@@ -56,6 +56,13 @@ def main(argv: Optional[List[str]] = None, api: Any = None) -> str:
     parser.add_argument("--output", type=Path, default=None, help="default: paths.model_artifact")
     args = parser.parse_args(argv)
 
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        pass  # Release jobs supply the environment directly and install only wandb
+    else:
+        load_dotenv(dotenv_path=REPO_ROOT / ".env", override=False)
+
     cfg = yaml.safe_load(args.config.read_text(encoding="utf-8")) or {}
     output = args.output or REPO_ROOT / str((cfg.get("paths") or {}).get("model_artifact") or "")
 
