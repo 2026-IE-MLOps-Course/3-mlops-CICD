@@ -126,6 +126,15 @@ Outputs of step 5:
 
 If the quality gate fails, the pipeline stops and **no model is saved**. That is the intended behaviour.
 
+**Run this reference in your own accounts** (use Ivan's data for this rehearsal, then build your group project separately):
+
+1. Create your own GitHub repository from this template, if available, or copy the repository into a new one under your account and clone it locally; create both `main` and `dev`, and require the `lint` and `test-and-build` checks on both using the branch protection settings in section 9
+2. Follow the quick start above to install the environment and download Ivan's data with `dvc pull`; create your own public DagsHub repository, run `dvc remote modify dagshub url https://dagshub.com/<your-user>/<your-repo>.dvc`, configure your local push credentials as described in section 9, then run `dvc push` and commit `.dvc/config`
+3. Copy `.env.example` to `.env` as shown above and enter your own `WANDB_API_KEY` and `WANDB_ENTITY`, with `WANDB_MODE=online`; `.env` configures local runs only, not GitHub Actions or Render
+4. Create a project in your own W&B account and set `wandb.project` in `config.yaml` to its name, with `wandb.enabled: true`; run `python -m src.main` at least twice, changing a model setting between runs to produce different model files, compare the gated versions in W&B, and assign `prod` to one that passed the quality gate; use your actual version numbers, which need not be `v2` and `v3`
+5. In your GitHub repository, open Settings > Secrets and variables > Actions and fill in the existing section 9 table with your own account values; follow its first-release steps to add the Render settings when the new service exists
+6. Follow section 9's first-release steps for the GitHub Release, public GHCR image, Render image-backed service and deploy hook; skip old-service cleanup if you have no old service, and keep all pull requests within your own repository
+
 ---
 
 ## 4. How the pipeline works
