@@ -28,8 +28,6 @@ import pandas as pd
 import wandb
 import yaml
 
-from src.evaluate import evaluate_calibration
-
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -220,6 +218,10 @@ def log_classification_plots(run: Optional[Any], cfg: Dict[str, Any], X_val: pd.
         })
 
     if wb.get("log_calibration_table", False):
+        # Imported here, not at module level: the API imports tracking.py for monitoring,
+        # and the serving image does not contain training-only evaluate.py
+        from src.evaluate import evaluate_calibration
+
         n_bins = int((cfg.get("evaluation") or {}).get("calibration_bins", 10))
         table, _ = evaluate_calibration(y_true=y_val, y_prob=y_probas[:, 1], n_bins=n_bins)
         log_table(run, f"tables/calibration_val_{stage_name}", table)

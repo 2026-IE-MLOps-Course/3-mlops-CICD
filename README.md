@@ -271,7 +271,7 @@ docker run -p 8000:8000 --name mlops-api mlops-api:local
 python scripts/smoke_test.py --url http://127.0.0.1:8000 --expect-commit $(git rev-parse HEAD)
 ```
 
-The Dockerfile has two stages. The builder installs `conda-lock.yml` exactly, then keeps only the packages the API needs (the dependency closure of its imports, at the locked versions). The runtime stage, a slim Debian base, receives that environment, `config.yaml`, `src/` and `models/` (see the allow-list in `.dockerignore`): about 0.9 GB instead of 4.3 GB, no conda, tests, notebooks, data or secrets, and it runs as a non-root user. It runs with `MODEL_SOURCE=local` and the baked model; `MODEL_VERSION` and `GIT_COMMIT` are set at build time and reported by `/health`, and the image carries the labels `org.opencontainers.image.revision` and `io.github.mlops.model-version`. Pass `--env-file .env` only if you want prediction logs sent to W&B.
+The Dockerfile has two stages. The builder installs `conda-lock.yml` exactly, then keeps only the packages the API needs (the dependency closure of its imports, at the locked versions). The runtime stage, a slim Debian base, receives that environment plus three explicit copies: `config.yaml`, the serving modules of `src/` and `models/model.joblib`. The allow-list in `.dockerignore` decides which modules: the API and what it imports (`api`, `clean_data`, `validate`, `infer`, `config`, `logger`, `tracking`, `registry`) plus `features.py`, because the saved model's preprocessing calls its functions by module path (it is replayed, never refitted). Training code (`main`, `train`, `load_data`, `utils`, `evaluate`) stays in the repository for local training and CI but is not in the image. The result is about 0.9 GB instead of 4.3 GB, with no conda, training code, tests, notebooks, data or secrets, and it runs as a non-root user. It runs with `MODEL_SOURCE=local` and the baked model; `MODEL_VERSION` and `GIT_COMMIT` are set at build time and reported by `/health`, and the image carries the labels `org.opencontainers.image.revision` and `io.github.mlops.model-version`. Pass `--env-file .env` only if you want prediction logs sent to W&B.
 
 ---
 
@@ -394,7 +394,7 @@ Free Render services sleep after inactivity. The first request can take about a 
 ├── .env.example                   # list of required secrets (no real values)
 ├── environment.yml                # human-readable dependencies
 ├── conda-lock.yml                 # exact dependencies for CI and Docker
-├── Dockerfile / .dockerignore     # lean serving image
+├── Dockerfile / .dockerignore     # lean serving image: inference + monitoring modules only
 ├── .flake8 / pytest.ini           # quality tool settings
 ├── data/
 │   ├── raw/opioid_raw_data.csv.dvc          # pointer in Git; the CSV comes from DagsHub (dvc pull)
@@ -455,6 +455,7 @@ Added and changed:
 - W&B runs record `lineage.git_commit` and `lineage.raw_data_md5`
 - W&B code only in `src/tracking.py` (writes, now also API prediction batches) and the new `src/registry.py` (reads, shared by the API and `fetch_prod_model.py`); helpers `tracking.flag` and `tracking.setting` (were `wandb_flag`, `wandb_setting`); config key `api.log_batch_size` (was `api.wandb_log_batch_size`)
 - CI: 90 % branch coverage floor; DVC installed from `conda-lock.yml`; the CI model is no longer uploaded (`gated-model` artifact removed)
+- Serving image holds only inference and monitoring code: `.dockerignore` lists the serving modules of `src/` (plus `features.py`, needed to load the saved preprocessing) and the Dockerfile copies `config.yaml`, `src/` and `models/model.joblib` explicitly; `tracking.py` imports `evaluate_calibration` only inside the training-only calibration-table branch
 - Removed `GET /ui` and `src/static/index.html`: `/docs` is the only UI
 - Tests renamed `test_unit_*` and `test_integration_*`; 100 % branch coverage of `src/`
 - Every function at cyclomatic complexity 10 or less; lazy `%s` logging; no linter suppressions
