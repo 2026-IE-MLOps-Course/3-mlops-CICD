@@ -31,7 +31,7 @@ training:
     max_iter: 500
     solver: "liblinear"
     random_state: 42
-    class_weight: "null"
+    class_weight: null
 
     # Calibration makes probabilities more reliable for thresholds and risk scores
     calibration_enabled: true
