@@ -11,8 +11,8 @@
 #
 # Two stages keep the image small
 #   1. builder: conda + conda-lock install the exact environment from conda-lock.yml
-#   2. runtime: a slim Debian base receives ONLY the finished environment, the code and the model
-#      (no conda, no package cache, no compilers)
+#   2. runtime: a slim Debian base receives ONLY the finished environment, config.yaml, the serving
+#      modules of src/ and the model (no conda, no package cache, no compilers, no training code)
 # --------------------------------------------------------
 
 # ===== Stage 1: builder =====
@@ -68,8 +68,11 @@ ENV PYTHONUNBUFFERED=1 \
 
 COPY --from=builder /opt/conda/envs/mlops /opt/conda/envs/mlops
 
-# Copy only what .dockerignore allows: config.yaml, src/ and models/ (the baked model)
-COPY . .
+# Explicit runtime files only. .dockerignore narrows src/ to the serving modules plus features.py
+# (the saved preprocessing calls its functions); train.py, main.py, evaluate.py, ... are not in the context
+COPY config.yaml ./
+COPY src/ ./src/
+COPY models/model.joblib ./models/
 
 # Traceability, baked in at build time: /health reports both values
 # MODEL_VERSION: the registry version the model came from; GIT_COMMIT: the commit the code came from
