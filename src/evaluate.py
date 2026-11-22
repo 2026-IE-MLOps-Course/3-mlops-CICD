@@ -7,7 +7,7 @@ Educational Goal:
 """
 
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -50,60 +50,136 @@ def evaluate_calibration(
     - Calibration metrics matter when teams use probabilities for prioritization, threshold setting, and risk
       communication
     """
-    if isinstance(y_true, pd.Series):
-        y_true = y_true.values
-
     y_true = np.asarray(y_true)
     y_prob = np.asarray(y_prob)
-
-    if len(y_true) == 0:
-        raise ValueError("Fatal: Cannot compute calibration on empty inputs")
-
-    if len(y_true) != len(y_prob):
-        raise ValueError(
-            f"Fatal: y_true length ({len(y_true)}) does not match y_prob length ({len(y_prob)})"
-        )
-
-    if np.any((y_prob < 0) | (y_prob > 1)):
-        raise ValueError("Fatal: y_prob must contain probabilities in [0, 1]")
+    _check_calibration_inputs(y_true, y_prob)
 
     try:
         bins = pd.qcut(y_prob, q=n_bins, duplicates="drop")
     except ValueError as e:
         logger.warning("Calibration binning failed: %s", e)
-        empty_df = pd.DataFrame(
-            columns=["bin", "mean_prob", "observed_rate", "count"])
-        return empty_df, float("nan")
-
-    calibration_df = pd.DataFrame(
-        {"y_true": y_true, "y_prob": y_prob, "bin": bins})
+        return pd.DataFrame(columns=["bin", "mean_prob", "observed_rate", "count"]), float("nan")
 
     calibration_df = (
-        calibration_df.groupby("bin", observed=False)
-        .agg(
-            mean_prob=("y_prob", "mean"),
-            observed_rate=("y_true", "mean"),
-            count=("y_true", "size"),
-        )
+        pd.DataFrame({"y_true": y_true, "y_prob": y_prob, "bin": bins})
+        .groupby("bin", observed=False)
+        .agg(mean_prob=("y_prob", "mean"), observed_rate=("y_true", "mean"), count=("y_true", "size"))
         .reset_index()
     )
-
     calibration_df["bin"] = calibration_df["bin"].astype(str)
 
+    # Identical probabilities leave no bins: calibration is undefined, not perfect
     if calibration_df.empty:
         return calibration_df, float("nan")
 
+    # ECE: share-weighted gap between predicted and observed event rates
     weights = calibration_df["count"] / calibration_df["count"].sum()
-    ece = float(
-        np.sum(
-            weights * np.abs(calibration_df["observed_rate"] - calibration_df["mean_prob"]))
-    )
-
+    ece = float(np.sum(weights * np.abs(calibration_df["observed_rate"] - calibration_df["mean_prob"])))
     return calibration_df, ece
 
 
+def _check_calibration_inputs(y_true: np.ndarray, y_prob: np.ndarray) -> None:
+    """Reject empty, misaligned or out-of-range inputs before binning (ValueError)."""
+    if len(y_true) == 0:
+        raise ValueError("Fatal: Cannot compute calibration on empty inputs")
+
+    if len(y_true) != len(y_prob):
+        raise ValueError(f"Fatal: y_true length ({len(y_true)}) does not match y_prob length ({len(y_prob)})")
+
+    if np.any((y_prob < 0) | (y_prob > 1)):
+        raise ValueError("Fatal: y_prob must contain probabilities in [0, 1]")
+
+
+def _check_eval_inputs(model: Any, X_eval: pd.DataFrame, y_eval: pd.Series) -> None:
+    """
+    Fail fast on empty or misaligned evaluation data and on objects that cannot predict
+
+    Inputs
+    - model, X_eval, y_eval: the arguments of evaluate_model
+
+    Outputs
+    - None. Raises ValueError or TypeError with an actionable message
+    """
+    if X_eval is None or len(X_eval) == 0:
+        raise ValueError("Fatal: X_eval is empty. Cannot evaluate model")
+
+    if y_eval is None or len(y_eval) == 0:
+        raise ValueError("Fatal: y_eval is empty. Cannot evaluate model")
+
+    if len(X_eval) != len(y_eval):
+        raise ValueError(
+            f"Fatal: X_eval rows ({len(X_eval)}) do not match y_eval rows ({len(y_eval)})"
+        )
+
+    if not hasattr(model, "predict"):
+        raise TypeError(f"Fatal: model must implement predict(), got type={type(model)}")
+
+
+def _positive_class_proba(model: Any, X_eval: pd.DataFrame) -> np.ndarray:
+    """
+    Inputs
+    - model: fitted classifier with predict_proba()
+    - X_eval: evaluation features
+
+    Outputs
+    - y_prob: probability of the positive class (column 1), one value per row
+
+    Why it matters
+    - A wrong probability shape usually means the model saw one class only; say so instead of crashing later
+    """
+    if not hasattr(model, "predict_proba"):
+        raise TypeError("Fatal: classification model must implement predict_proba()")
+
+    proba = np.asarray(model.predict_proba(X_eval))
+
+    if proba.ndim != 2 or proba.shape[0] != len(X_eval):
+        raise ValueError(f"Fatal: predict_proba returned invalid shape {proba.shape}")
+
+    if proba.shape[1] < 2:
+        raise ValueError(
+            "Fatal: predict_proba returned only one probability column. "
+            "This usually means the model saw only one class during training"
+        )
+    return proba[:, 1]
+
+
+def _classification_metrics(model: Any, X_eval: pd.DataFrame, y_eval: pd.Series) -> Dict[str, float]:
+    """
+    Inputs
+    - model: fitted classifier, X_eval and y_eval: evaluation split
+
+    Outputs
+    - metrics: pr_auc (gate metric for rare events), roc_auc and ece (calibration error)
+    """
+    if y_eval.nunique(dropna=True) < 2:
+        raise ValueError(
+            "Fatal: y_eval contains only one class in this split, so AUC metrics are undefined. "
+            "Use stratified splitting, adjust split ratios, or increase dataset size"
+        )
+
+    y_prob = _positive_class_proba(model, X_eval)
+    _, ece = evaluate_calibration(y_eval, y_prob)
+    return {
+        "pr_auc": float(average_precision_score(y_eval, y_prob)),
+        "roc_auc": float(roc_auc_score(y_eval, y_prob)),
+        "ece": ece,
+    }
+
+
+def _regression_metrics(model: Any, X_eval: pd.DataFrame, y_eval: pd.Series) -> Dict[str, float]:
+    """
+    Inputs
+    - model: fitted regressor, X_eval and y_eval: evaluation split
+
+    Outputs
+    - metrics: rmse (same unit as the target, lower is better)
+    """
+    y_pred = model.predict(X_eval)
+    return {"rmse": float(np.sqrt(mean_squared_error(y_eval, y_pred)))}
+
+
 def evaluate_model(
-    model,
+    model: Any,
     X_eval: pd.DataFrame,
     y_eval: pd.Series,
     problem_type: str,
@@ -123,71 +199,20 @@ def evaluate_model(
     - Returning JSON safe floats prevents serialization issues in experiment tracking tools
     """
     logger.info("Starting evaluation")
-
-    if X_eval is None or len(X_eval) == 0:
-        raise ValueError("Fatal: X_eval is empty. Cannot evaluate model")
-
-    if y_eval is None or len(y_eval) == 0:
-        raise ValueError("Fatal: y_eval is empty. Cannot evaluate model")
-
-    if len(X_eval) != len(y_eval):
-        raise ValueError(
-            f"Fatal: X_eval rows ({len(X_eval)}) do not match y_eval rows ({len(y_eval)})"
-        )
-
-    if not hasattr(model, "predict"):
-        raise TypeError(
-            f"Fatal: model must implement predict(), got type={type(model)}")
+    _check_eval_inputs(model, X_eval, y_eval)
 
     pt = _normalize_problem_type(problem_type)
-
     if pt == "classification":
-        if y_eval.nunique(dropna=True) < 2:
-            raise ValueError(
-                "Fatal: y_eval contains only one class in this split, so AUC metrics are undefined. "
-                "Use stratified splitting, adjust split ratios, or increase dataset size"
-            )
+        metrics = _classification_metrics(model, X_eval, y_eval)
+    elif pt == "regression":
+        metrics = _regression_metrics(model, X_eval, y_eval)
+    else:
+        raise ValueError(
+            f"Fatal: Unsupported problem_type '{problem_type}'. Use 'classification' or 'regression'"
+        )
 
-        if not hasattr(model, "predict_proba"):
-            raise TypeError(
-                "Fatal: classification model must implement predict_proba()")
-
-        proba = model.predict_proba(X_eval)
-
-        if not isinstance(proba, np.ndarray):
-            proba = np.asarray(proba)
-
-        if proba.ndim != 2 or proba.shape[0] != len(X_eval):
-            raise ValueError(
-                f"Fatal: predict_proba returned invalid shape {getattr(proba, 'shape', None)}"
-            )
-
-        if proba.shape[1] < 2:
-            raise ValueError(
-                "Fatal: predict_proba returned only one probability column. "
-                "This usually means the model saw only one class during training"
-            )
-
-        y_prob = proba[:, 1]
-        _, ece = evaluate_calibration(y_eval, y_prob)
-
-        metrics = {
-            "pr_auc": float(average_precision_score(y_eval, y_prob)),
-            "roc_auc": float(roc_auc_score(y_eval, y_prob)),
-            "ece": ece,
-        }
-        logger.info("Metrics=%s", metrics)
-        return metrics
-
-    if pt == "regression":
-        y_pred = model.predict(X_eval)
-        metrics = {"rmse": float(np.sqrt(mean_squared_error(y_eval, y_pred)))}
-        logger.info("Metrics=%s", metrics)
-        return metrics
-
-    raise ValueError(
-        f"Fatal: Unsupported problem_type '{problem_type}'. Use 'classification' or 'regression'"
-    )
+    logger.info("Metrics=%s", metrics)
+    return metrics
 
 
 def check_quality_gate(

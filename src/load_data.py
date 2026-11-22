@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 def load_raw_data(raw_data_path: Path) -> pd.DataFrame:
     """
+    Load the raw training or inference CSV and fail fast on a missing, folder or empty path
+
     Inputs:
     - raw_data_path: Path to the raw CSV file
     Outputs:
@@ -25,13 +27,13 @@ def load_raw_data(raw_data_path: Path) -> pd.DataFrame:
     Why this contract matters for reliable ML delivery:
     - A stable ingestion interface prevents downstream rewiring when data sources evolve
     """
-    logger.info(f"Loading raw data from {raw_data_path}")
+    logger.info("Loading raw data from %s", raw_data_path)
 
     # 1) Pipeline Guardrail: Missing Data Dependency
     if not raw_data_path.exists():
         raise FileNotFoundError(
             f"Ingestion Error: The raw data file was not found at {raw_data_path}. "
-            f"Please ensure your raw dataset is placed in the 'data/raw/' directory."
+            "Run dvc pull to download the versioned data, or check paths.raw_data in config.yaml."
         )
 
     # 2) Pipeline Guardrail: Not a File
@@ -52,6 +54,6 @@ def load_raw_data(raw_data_path: Path) -> pd.DataFrame:
         )
 
     # 5) Observability
-    logger.info(f"Loaded dataframe shape: {df_raw.shape}")
+    logger.info("Loaded dataframe shape: %s", df_raw.shape)
 
     return df_raw

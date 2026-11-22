@@ -1,120 +1,60 @@
 # tests/test_features.py
-
 """
 Educational Goal:
-- Why this test exists in an MLOps system: Validate the feature engineering contract without relying on training code
-- Responsibility (separation of concerns): Ensure get_feature_preprocessor builds a valid ColumnTransformer
-  and fails fast on bad config
-- Pipeline contract (inputs and outputs): Returns a configured ColumnTransformer or raises early when config is invalid
+- features.py returns an UNFITTED recipe built from config lists; fitting happens in train.py only
+- The derived binary_sum feature is computed inside the pipeline (no training-serving skew)
 """
 
 import numpy as np
 import pandas as pd
 import pytest
 from sklearn.compose import ColumnTransformer
+from sklearn.utils.validation import check_is_fitted
 
-from src.features import get_feature_preprocessor, _row_sum_numpy
-
-
-def _transformer_names(preprocessor: ColumnTransformer) -> list:
-    """Helper to extract step names from a ColumnTransformer."""
-    return [name for name, _, _ in preprocessor.transformers]
+from src.features import _binary_sum_names_out, _row_sum_numpy, get_feature_preprocessor
+from src.train import train_model
 
 
-# --------------------------------------------------------
-# 1) FAIL FAST: Empty configuration raises
-# --------------------------------------------------------
-def test_get_feature_preprocessor_raises_on_empty_config():
-    """
-    Inputs:
-    - All feature lists empty
-    Outputs:
-    - ValueError
-    Why this contract matters for reliable ML delivery:
-    - Empty recipes should crash at build time, not halfway through training
-    """
-    with pytest.raises(ValueError, match=r"No feature columns configured"):
-        get_feature_preprocessor(
-            quantile_bin_cols=[],
-            categorical_onehot_cols=[],
-            numeric_passthrough_cols=[],
-            binary_sum_cols=[],
-            n_bins=4,
-        )
+def test_unit_raises_on_empty_config():
+    with pytest.raises(ValueError, match="No feature columns"):
+        get_feature_preprocessor()
 
 
-# --------------------------------------------------------
-# 2) FAIL FAST: Invalid bin count raises
-# --------------------------------------------------------
-def test_get_feature_preprocessor_raises_on_invalid_n_bins():
-    """
-    Inputs:
-    - n_bins = 1
-    Outputs:
-    - ValueError
-    Why this contract matters for reliable ML delivery:
-    - We fail fast with a clear message before scikit-learn errors later
-    """
-    with pytest.raises(ValueError, match=r"n_bins must be >= 2"):
-        get_feature_preprocessor(
-            quantile_bin_cols=["rx_ds"],
-            n_bins=1,
-        )
+def test_unit_raises_on_invalid_n_bins():
+    with pytest.raises(ValueError, match="n_bins"):
+        get_feature_preprocessor(quantile_bin_cols=["rx_ds"], n_bins=1)
 
 
-# --------------------------------------------------------
-# 3) CONTRACT: Returns ColumnTransformer and registers expected blocks
-# --------------------------------------------------------
-def test_get_feature_preprocessor_returns_columntransformer_and_registers_blocks():
-    """
-    Inputs:
-    - Valid configuration with multiple transformer types
-    Outputs:
-    - ColumnTransformer with expected named blocks
-    Why this contract matters for reliable ML delivery:
-    - A stable recipe boundary lets train.py stay simple and consistent
-    """
-    preprocessor = get_feature_preprocessor(
-        quantile_bin_cols=["rx_ds"],
-        categorical_onehot_cols=["gender"],
-        numeric_passthrough_cols=["age"],
-        binary_sum_cols=["flag_1", "flag_2"],
-        n_bins=4,
+def test_unit_registers_every_configured_block_unfitted():
+    pre = get_feature_preprocessor(
+        quantile_bin_cols=["rx_ds"], categorical_onehot_cols=["sex"], numeric_passthrough_cols=["A"],
+        binary_sum_cols=["A", "B"], n_bins=3,
     )
-
-    assert isinstance(preprocessor, ColumnTransformer)
-
-    names = _transformer_names(preprocessor)
-
-    assert "quantile_bins" in names
-    assert "cat_ohe" in names
-    assert "binary_sum" in names
-    assert "num_scaled" in names
+    assert isinstance(pre, ColumnTransformer)
+    assert [name for name, _, _ in pre.transformers] == ["quantile_bins", "cat_ohe", "binary_sum", "num_scaled"]
+    assert pre.remainder == "drop"
+    with pytest.raises(Exception):
+        check_is_fitted(pre)
 
 
-# --------------------------------------------------------
-# 4) CORRECTNESS: binary_sum math works (unit test)
-# --------------------------------------------------------
-def test_row_sum_numpy_computes_expected_sums():
-    """
-    Inputs:
-    - Dummy indicator matrix
-    Outputs:
-    - Expected row-wise sums as a 2D array
-    Why this contract matters for reliable ML delivery:
-    - The derived feature must be deterministic before any scaling happens
-    """
-    df_dummy = pd.DataFrame(
-        {
-            "flag_1": [1, 0, 1],
-            "flag_2": [1, 0, 0],
-            "flag_3": [0, 0, 1],
-        }
-    )
+def test_unit_only_configured_blocks_are_built():
+    pre = get_feature_preprocessor(numeric_passthrough_cols=["A"])
+    assert [name for name, _, _ in pre.transformers] == ["num_scaled"]
 
-    sums = _row_sum_numpy(df_dummy)
 
-    expected = np.array([[2], [0], [2]])
+def test_unit_row_sum_handles_2d_and_1d_inputs():
+    assert _row_sum_numpy(np.array([[1, 0, 1], [0, 0, 0]])).tolist() == [[2], [0]]
+    assert _row_sum_numpy(np.array([1, 0, 1])).tolist() == [[1], [0], [1]]
+    assert _binary_sum_names_out(None, ["A", "B"]).tolist() == ["binary_sum"]
 
-    assert sums.shape == expected.shape
-    np.testing.assert_array_equal(sums, expected)
+
+def test_integration_recipe_fits_inside_pipeline_and_names_features():
+    X = pd.DataFrame({"rx_ds": [1.0, 5.0, 9.0, 12.0, 30.0, 60.0], "sex": ["f", "m", "f", "m", "f", "m"],
+                      "A": [1, 0, 1, 0, 1, 0], "B": [0, 0, 1, 1, 0, 1]})
+    y = pd.Series([0, 0, 1, 0, 1, 1])
+    pre = get_feature_preprocessor(quantile_bin_cols=["rx_ds"], categorical_onehot_cols=["sex"],
+                                   numeric_passthrough_cols=["A"], binary_sum_cols=["A", "B"], n_bins=2)
+    pipeline = train_model(X, y, pre, "classification", None, 0)
+    names = list(pipeline.named_steps["preprocess"].get_feature_names_out())
+    assert "binary_sum__binary_sum" in names
+    assert len(pipeline.predict(X)) == len(X)

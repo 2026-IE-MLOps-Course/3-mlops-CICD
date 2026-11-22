@@ -22,6 +22,9 @@ def configure_logging(*, log_level: str = "INFO", log_file: Optional[Path] = Non
     Inputs
     - log_level: "DEBUG", "INFO", "WARNING", "ERROR"
     - log_file: Path to a log file. None means console only (useful inside containers)
+
+    Outputs
+    - None. Every module logger now writes timestamped lines to the console (and the file)
     """
     numeric_level = getattr(logging, (log_level or "INFO").upper(), logging.INFO)
 

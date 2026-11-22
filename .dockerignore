@@ -1,21 +1,33 @@
 # .dockerignore
 # Lean serving image: allow-list strategy
-# Ignore everything, then allow only what the API needs at runtime
+# Ignore everything, then allow only what the API needs at runtime.
+# Training code (main.py, train.py, load_data.py, utils.py, evaluate.py) stays in the repository
+# for local training and CI, but never reaches the serving image
 
 **
 
-# Build recipe and locked environment
+# Build recipe and locked environment (the builder stage installs it; the runtime stage never copies it)
 !Dockerfile
 !conda-lock.yml
 
-# Runtime config and application code
+# Runtime config
 !config.yaml
-!src/
-!src/**
 
-# Local model fallback (used when MODEL_SOURCE=local)
-!models/
-!models/**
+# Serving code: the API and every module it imports
+!src/__init__.py
+!src/api.py
+!src/clean_data.py
+!src/validate.py
+!src/infer.py
+!src/config.py
+!src/logger.py
+!src/tracking.py
+!src/registry.py
+# Saved preprocessing: the pickled model references functions in src/features.py by module path
+!src/features.py
+
+# The baked model (MODEL_SOURCE=local in the image)
+!models/model.joblib
 
 # Safety net: never ship these even if a rule above changes
 **/__pycache__
