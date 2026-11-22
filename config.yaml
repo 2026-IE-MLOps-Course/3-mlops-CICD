@@ -31,7 +31,7 @@ training:
     max_iter: 500
     solver: "liblinear"
     random_state: 42
-    class_weight: "balanced"
+    class_weight: "null"
 
     # Calibration makes probabilities more reliable for thresholds and risk scores
     calibration_enabled: true
@@ -115,10 +115,10 @@ wandb:
   enabled: true
   project: "opioid-risk-classification"
 
-  name: "01-calibrated-logistic-regression"
+  name: "02-calibrated-logistic-regression-unweighted"
   job_type: "training-pipeline"
   group: "session11-baselines"
-  tags: ["baseline", "logreg", "calibrated"]
+  tags: ["candidate", "logreg", "calibrated"]
   notes: "Logistic regression with per-flag features and probability calibration"
 
   model_artifact_name: "opioid_classification_model"
