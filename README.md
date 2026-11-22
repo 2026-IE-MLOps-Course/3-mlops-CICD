@@ -321,6 +321,8 @@ A person decides **what** ships (moves the W&B alias `prod`) and **when** (publi
 3. **publish-image** (the only job with `packages: write`): `scripts/fetch_prod_model.py` resolves `prod` to a concrete version and downloads it; the image is built with `MODEL_VERSION` and `GIT_COMMIT`, run locally and smoke-tested (`/health` must report the tag commit and that model version, `/predict` must answer), then pushed to `ghcr.io/<owner>/<repo>` as `X.Y.Z`, `X.Y`, `latest` and `sha-<short>`
 4. **deploy**: calls the Render deploy hook with `imgURL=ghcr.io/<owner>/<repo>:X.Y.Z`, then runs `scripts/smoke_test.py` against the live URL until `/health` reports the tag commit
 
+The release build disables BuildKit provenance so the first push publishes the image with its repository source label, rather than creating a package from an unlinked attestation first. If a previous push left an unlinked GHCR package and reports `denied`, a package administrator must connect the package to this repository and grant it write access under **Package settings > Manage Actions access** (or enable inherited repository permissions). Then re-run the failed jobs. A re-run uses the original release's workflow; changes to `deploy.yml` apply only to releases containing those changes.
+
 ### One-time setup
 
 **Render** (New > Web Service > **Existing image**, Free plan):
