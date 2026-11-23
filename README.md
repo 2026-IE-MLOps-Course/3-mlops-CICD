@@ -446,6 +446,12 @@ Generated and ignored by Git: `models/`, `reports/`, `logs/`, `wandb/`, `artifac
 
 Format: [Keep a Changelog](https://keepachangelog.com), versions follow [Semantic Versioning](https://semver.org).
 
+### [3.0.1] - 2026-11-23
+
+- Package the API with W&B model artifact `idiazl/opioid-risk-classification/opioid_classification_model:v1`
+- Use calibrated logistic regression without automatic class weighting (`class_weight: null`)
+- The model passed the validation quality gate; this release exercises deployment of a different model and rollback to `v3.0.0`
+
 ### [3.0.0] - 2026-11-17
 
 Breaking changes (update any code or notebook that calls `src` directly):
