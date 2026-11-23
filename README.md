@@ -47,7 +47,7 @@ Baseline: an untargeted call list reaches about **18 high-risk patients per 100 
 | ML metric (quality gate) | `pr_auc` on the validation split (`config.yaml > evaluation.quality_gate`) | 0.18 (positive rate, a random ranking) | >= 0.40 (minimum) |
 | ML metric (reported) | `roc_auc`, `ece` (calibration error) | not gated | reported in W&B |
 
-Why `pr_auc`: only about 18 % of patients are positive, so accuracy would look good for a model that predicts "no risk" for everyone. PR AUC rewards ranking the rare positives first, which is exactly what the call list needs. Current model, validation: `pr_auc` 0.61, `roc_auc` 0.84, `ece` 0.08. On the untouched test split, calling the top 20 % gives 53 true high-risk patients per 100 calls (59 % of all of them).
+Why `pr_auc`: only about 18 % of patients are positive, so accuracy would look good for a model that predicts "no risk" for everyone. PR AUC rewards ranking the rare positives first, which is exactly what the call list needs. Balanced reference model, validation: `pr_auc` 0.61, `roc_auc` 0.84, `ece` 0.08. On the untouched test split, calling the top 20 % gives 53 true high-risk patients per 100 calls (59 % of all of them).
 
 ### Solution
 
@@ -76,6 +76,16 @@ Value: at the same weekly call capacity, about three times more high-risk patien
 - The 40 per 100 target is a teaching estimate, to be agreed with the care-manager lead
 - No fairness check by `Low_inc` group yet, and no drift monitoring beyond prediction logging in W&B
 - Synthetic data: results say nothing about real patients
+
+### Two-model teaching sequence
+
+Start with the unweighted calibrated logistic regression in `config.yaml`: `class_weight: null`, run name `01-calibrated-logistic-regression-unweighted` and tag `baseline`. YAML null has no quotation marks and becomes Python None, meaning no automatic class weighting.
+
+For the enhancement, create `feature/model-candidate` from dev, set `class_weight: "balanced"`, use run name `02-calibrated-logistic-regression-balanced` and replace tag `baseline` with `candidate`. Balanced weighting gives the less frequent class more weight during fitting. Commit the settings before training so W&B records the matching code commit.
+
+Compare the final calibrated validation metrics in W&B > Overview > Summary. Both models must meet the quality gate; approve the balanced candidate only when its validation comparison supports the change. In the checked reference comparison, unweighted versus balanced gave validation PR AUC 0.6078 versus 0.6096, ROC AUC 0.8335 versus 0.8446, and calibration error 0.0912 versus 0.0834. This is a small observed improvement on the fixed teaching split, not a guarantee that class weighting always helps. Test metrics are a final audit, not the selection rule.
+
+Publish the unweighted baseline as the first release and the approved balanced enhancement as the second. The guides use unused example tags `v3.1.0` and `v3.1.1`; choose another unused pair if needed. Roll back briefly to the baseline image, then roll forward to the balanced image and leave `prod` aligned with that model. Model artifact versions are assigned by W&B and are separate from application release numbers.
 
 ---
 
@@ -365,10 +375,10 @@ This is a solo reference repo, so it requires 0 approvals on `main` and `dev`; s
 1. Merge `dev` into `main` through a Pull Request (CI must be green)
 2. In W&B, move the alias `prod` to the gated version you want to ship
 3. Update the changelog below
-4. GitHub > Releases > Draft a new release > tag `v3.0.0` on `main` > Publish
+4. GitHub > Releases > Draft a new release > choose an unused tag on `main` > Publish; for the two-model exercise use `v3.1.0` for the unweighted baseline and `v3.1.1` for the approved balanced candidate
 5. Watch Actions > "CD - Deploy to Render"; when it is green, `/health` shows the new `git_commit` and `model_version`
 
-**Rollback:** Actions > "CD - Deploy to Render" > Run workflow > tag, for example `v3.0.0`. The workflow skips guard, CI and the image build, redeploys `ghcr.io/<owner>/<repo>:3.0.0` and smoke-tests it. Then move `prod` back in W&B to the version that release carries.
+**Rollback:** Actions > "CD - Deploy to Render" > Run workflow > branch main > tag, for example baseline release `v3.1.0`. The workflow skips guard, CI and the image build, redeploys `ghcr.io/<owner>/<repo>:3.1.0` and smoke-tests it. Align prod with the baseline for the rollback, then restore prod to the balanced model and roll forward to the enhancement image `3.1.1` to finish the demonstration.
 
 Rollback log (rehearsals and real rollbacks, newest first):
 
@@ -435,6 +445,12 @@ Generated and ignored by Git: `models/`, `reports/`, `logs/`, `wandb/`, `artifac
 ## 12. Changelog
 
 Format: [Keep a Changelog](https://keepachangelog.com), versions follow [Semantic Versioning](https://semver.org).
+
+### [3.0.1] - 2026-11-23
+
+- Package the API with W&B model artifact `idiazl/opioid-risk-classification/opioid_classification_model:v1`
+- Use calibrated logistic regression without automatic class weighting (`class_weight: null`)
+- The model passed the validation quality gate; this release exercises deployment of a different model and rollback to `v3.0.0`
 
 ### [3.0.0] - 2026-11-17
 

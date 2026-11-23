@@ -1,37 +1,48 @@
-# Class demo: from pull request to live, traceable prediction (10 minutes)
+# Class demo: unweighted baseline to balanced enhancement
 
-Goal: show that a person decides **what** ships (W&B alias `prod`) and **when** (a GitHub Release), and automation does the rest, with a rollback by tag.
+Goal: show how a measured model improvement becomes a tested release, then demonstrate rollback and roll forward without retraining. A person chooses the approved W&B model with prod and starts a release; automation builds, checks, publishes and deploys the selected package.
 
-## Before class (15 minutes earlier)
+## The two models
 
-- Set the live URL once (README section 2): `export RENDER_URL=https://<new-render-service>.onrender.com`
-- Wake Render: `python scripts/smoke_test.py --url "$RENDER_URL" --timeout 300`
-- Open tabs: the repo (Pull requests, Actions, Releases), W&B project `opioid-risk-classification` (Artifacts > `opioid_classification_model`), the live `/docs`, DagsHub
-- Have a small PR ready on `feature/*` into `dev` (for example a README typo) with CI already green
-- Know the two tags you will use: the current release (for example `v3.0.1`) and the one to roll back to (`v3.0.0`)
-- Fallback screenshots for every step are in `docs/demo/` (name them `01-pr.png` ... `08-rollback.png`)
+| Role | Training setting | W&B run label | Example application release |
+| --- | --- | --- | --- |
+| Starting baseline | `class_weight: null` without quotes | `01-calibrated-logistic-regression-unweighted`, tag baseline | `v3.1.0` |
+| Enhancement candidate | `class_weight: "balanced"` | `02-calibrated-logistic-regression-balanced`, tag candidate | `v3.1.1` |
+
+Use an unused release pair. W&B model versions are independent of these application tags; use the actual version attached to each run. Keep both tested images for rollback.
+
+## Before class
+
+- Complete the instructor or student end-to-end guide through both training runs; do not retrain just for this short demonstration
+- Start with the unweighted baseline image live and both runs available in W&B
+- Have the balanced candidate's feature → dev → main PR checks complete before publishing its release
+- Open the GitHub PR, Actions and Releases pages, W&B project, Render service, live /health and /docs
+- Confirm the new service's hook and URL are configured, and the published baseline image remains available
+- If using fallback screenshots, prepare them as described in docs/demo/README.md; this is optional
 
 ## Script
 
-| Min | Show | Say |
-|---|---|---|
-| 0-1 | Pull request into `dev`, checks `lint` and `test-and-build` green | "Nothing merges without the same checks: lint, the real pipeline with its quality gate, 90 % branch coverage, a Docker build." Open the run summary: the gate line `pr_auc=0.61 >= 0.40` |
-| 1-3 | W&B > `opioid_classification_model` > versions | "Every version here passed the gate; a failed gate saves nothing." Open the newest version: metrics and `lineage.git_commit`, `lineage.raw_data_md5`. Move the alias `prod` to it. "Moving the label changes nothing in production yet." |
-| 3-4 | GitHub > Releases > Draft > tag `v3.0.1` on `main` > Publish | "A person publishes. From here on, no human touches production." |
-| 4-7 | Actions > "CD - Deploy to Render" run | Walk the jobs: **guard** (tag is on `main`), **ci** (full CI again on the tag), **publish-image** (`fetch_prod_model.py` resolves `prod` to `opioid_classification_model:vN`; build; the container passes the smoke test **before** push; tags `3.0.1`, `3.0`, `latest`, `sha-...`), **deploy** (Render pulls `:3.0.1`, live smoke test waits for the new commit) |
-| 7-8 | Live `$RENDER_URL/health`, then `/docs` > POST `/predict` with `scripts/sample_request.json` | "`git_commit` and `model_version` prove what is running." |
-| 8-9 | Trace back | `git_commit` -> the commit on GitHub; `model_version` -> the W&B version -> its run -> `lineage.raw_data_md5` = the md5 in `data/raw/opioid_raw_data.csv.dvc` -> the file on DagsHub |
-| 9-10 | Actions > "CD - Deploy to Render" > Run workflow > tag `v3.0.0` | "Rollback redeploys the old image: code and model go back together. Then I move `prod` back in W&B so the next release does not re-ship the bad model." Show `/health` with the old commit and model version |
+| Min | Show | Explain |
+| --- | --- | --- |
+| 0-1 | Baseline run's Config and live /health | The first model uses unweighted logistic regression, `class_weight: null`; the running image contains that specific approved model |
+| 1-3 | First and candidate runs > Overview > Summary | Compare `metrics/val_after_calibration/pr_auc`, `roc_auc` and `ece`; balanced weighting is the candidate enhancement. Both passing the 0.40 gate is necessary, but approval also needs a favourable validation comparison. Test metrics are the final audit |
+| 3-4 | Balanced run's Artifacts tab and its model version | Move prod to the measured, gated improvement. Refresh /health: approval alone has not changed the running baseline image |
+| 4-5 | GitHub > Releases > Draft a new release > unused tag `v3.1.1` on main > Publish | Publishing starts the automation after the code has passed the PR and main checks |
+| 5-7 | CD - Deploy to Render | Guard checks the release commit; CI checks it; publish-image downloads prod to a concrete model file, builds the image, smoke-tests it before GHCR upload; deploy requests that exact image and smoke-tests the live service |
+| 7-8 | Live /health and /docs > POST /predict | The code commit and concrete model version identify the deployed balanced enhancement. Follow its W&B artifact to the training run, configuration and raw-data fingerprint |
+| 8-9 | Actions > CD - Deploy to Render > Run workflow > branch main > tag `v3.1.0` | Briefly restore the baseline image to demonstrate rollback of code and model together; no training or build runs. Confirm /health and align prod with that model |
+| 9-10 | Run workflow again with branch main and tag `v3.1.1` | Restore prod to the balanced model and roll forward to its existing image. Confirm /health; finish with the balanced enhancement live and approved |
 
-## If something fails
+## Interpret the comparison honestly
 
-- Render asleep or slow: show screenshot `docs/demo/07-health.png`, keep talking about the trace, retry `/health` at the end
-- Deploy run still running at minute 7: open the previous green run of the same workflow and walk through it
-- W&B unreachable: show the version page screenshot; the release image already carries the model, the live API does not depend on W&B
-- Rollback takes too long: show the previous successful manual run and the rollback log in README section 9
+In the fixed reference comparison, the unweighted baseline had validation PR AUC 0.6078, ROC AUC 0.8335 and calibration error 0.0912. Balanced weighting gave 0.6096, 0.8446 and 0.0834 respectively. The PR AUC gain is small. Show the actual run values, not an exaggerated claim of a universal improvement. If the candidate does not improve the validation comparison, retain the baseline and stop promotion rather than lowering the gate or choosing from test results.
+
+Rollback is a recovery capability demonstration; it does not mean the balanced model has failed. Finish by restoring the measured improvement. If W&B is unavailable, the already-published image can still answer predictions, although monitoring uploads may fail.
 
 ## Questions to ask the class
 
-1. Which two decisions did a person make, and which steps did automation make?
-2. Why is the smoke test run on the container **before** the image is pushed?
-3. After a rollback, why do we also move `prod` back?
+1. What changed between the unweighted baseline and balanced candidate?
+2. Why does passing the minimum gate alone not prove an improvement?
+3. Why does moving prod leave the live model unchanged until deployment?
+4. Which file joins the model and code inside the image, and why test that image before publishing it?
+5. Why can rollback and roll forward reuse existing images without training, and why align prod afterwards?
