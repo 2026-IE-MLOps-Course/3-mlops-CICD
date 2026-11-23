@@ -448,9 +448,10 @@ Format: [Keep a Changelog](https://keepachangelog.com), versions follow [Semanti
 
 ### [3.0.1] - 2026-11-23
 
-- Package the API with W&B model artifact `idiazl/opioid-risk-classification/opioid_classification_model:v1`
-- Use calibrated logistic regression without automatic class weighting (`class_weight: null`)
-- The model passed the validation quality gate; this release exercises deployment of a different model and rollback to `v3.0.0`
+- Select W&B model artifact `idiazl/opioid-risk-classification/opioid_classification_model:v1` for packaging with the API, using calibrated logistic regression without automatic class weighting (`class_weight: null`)
+- The selected model passed the validation quality gate; this private rehearsal tests a model switch rather than a validation improvement over the balanced v0 model
+- Publishing GitHub release `v3.0.1` starts CI, image build and smoke testing, GHCR publication as `ghcr.io/2026-ie-mlops-course/3-mlops-cicd:3.0.1`, and deployment through the Render hook after the preceding checks pass; Render Auto-Deploy can remain disabled
+- Keep image `3.0.0`, containing the stronger balanced model `opioid_classification_model:v0`, available for the planned rollback; deployment, rollback and monitoring require separate verification
 
 ### [3.0.0] - 2026-11-17
 
