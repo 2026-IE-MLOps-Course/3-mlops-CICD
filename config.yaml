@@ -115,10 +115,10 @@ wandb:
   enabled: true
   project: "opioid-risk-classification"
 
-  name: "02-calibrated-logistic-regression-unweighted"
+  name: "01-calibrated-logistic-regression-unweighted"
   job_type: "training-pipeline"
   group: "session11-baselines"
-  tags: ["candidate", "logreg", "calibrated"]
+  tags: ["baseline", "logreg", "calibrated"]
   notes: "Logistic regression with per-flag features and probability calibration"
 
   model_artifact_name: "opioid_classification_model"
