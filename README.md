@@ -102,12 +102,21 @@ Publish the unweighted baseline as the first release and the approved balanced e
 
 ## 3. Quick start (about 10 minutes)
 
+Before the first data download, sign in to your own DagsHub account and configure ignored `.dvc/config.local` as shown below. The reference repository is public, but its current DVC HTTP endpoint requires authentication for downloads (an anonymous request returned HTTP 401). Keep the shared `.dvc/config` URL unchanged when retrieving the course data.
+
+```ini
+['remote "dagshub"']
+    auth = basic
+    user = YOUR_DAGSHUB_USERNAME
+    password = YOUR_DAGSHUB_TOKEN
+```
+
 ```bash
 # 1. Create and activate the environment (exact versions, same as CI and Docker)
 conda-lock install --name mlops conda-lock.yml   # or: conda env create -f environment.yml
 conda activate mlops
 
-# 2. Pull the exact data versions (the DagsHub repo is public: no account or token needed to read)
+# 2. Pull the exact data versions using your local DagsHub authentication
 dvc pull
 
 # 3. Add your secrets (never commit .env)
@@ -117,8 +126,8 @@ cp .env.example .env            # then edit .env
 flake8
 pytest --cov=src --cov-branch
 
-# 5. Run the full pipeline: train, quality gate, test audit, save, batch inference
-dvc repro                       # or: python -m src.main
+# 5. Train, quality gate, test audit, save, batch inference (read-only access to reference data)
+dvc repro                       # for the publishing demo, use python scripts/run_demo.py instead
 
 # 6. Serve the model locally and test it
 uvicorn src.api:app --reload
@@ -294,7 +303,21 @@ feature/* --PR--> dev --PR--> main --(person moves W&B alias prod, then publishe
 
 ### Data and pipeline versioning: DagsHub, `.dvc` pointers, `dvc.yaml` and `dvc.lock`
 
-The raw and inference CSV files live on DagsHub (`https://dagshub.com/phidesigner/3-mlops-CICD.dvc`). Git stores only their `.dvc` pointer files (`data/raw/opioid_raw_data.csv.dvc` and `data/inference/opioid_infer_01.csv.dvc`); the CSVs themselves are ignored by Git. `dvc.yaml` declares the whole pipeline as one stage: its inputs (`src/`, `config.yaml`, the raw and inference CSV files) and its outputs (`clean.csv`, `model.joblib`, `predictions.csv`). `dvc.lock` records the md5 of each one. Commit `.dvc` pointers and `dvc.lock` with every change to data, settings or code, and any commit tells you exactly which data its model came from.
+The reference DVC remote is `https://dagshub.com/phidesigner/3-mlops-CICD.dvc`, configured in `.dvc/config`. DVC caches and uploads the two input CSVs referenced by `data/raw/opioid_raw_data.csv.dvc` and `data/inference/opioid_infer_01.csv.dvc`. Git stores those small pointers, not the CSV contents. `dvc.yaml` declares the training pipeline and its outputs (`clean.csv`, `model.joblib`, `predictions.csv`). Those three outputs use `cache: false`: DVC records their fingerprints in `dvc.lock`, while the configured online training run uploads the actual output files to W&B. Commit the pointers and `dvc.lock` with the corresponding changes to data, settings or code.
+
+**Instructor demo: upload the data, verify retrieval, then train**
+
+With the existing `mlops` environment active, run this once instead of a separate training command:
+
+```bash
+python scripts/run_demo.py
+```
+
+The command checks that both local CSVs match their recorded fingerprints, caches and uploads them to the configured DVC remote, downloads them into an empty temporary cache, verifies the downloaded bytes, then runs `dvc repro --force` for training and W&B uploads. It stops before training if data publication or verification fails. Uploads are idempotent: data already present is reused rather than duplicated.
+
+The first run prompts privately for the DagsHub username and token if they are missing, and stores them only in ignored `.dvc/config.local`. Uploading requires write access to the configured repository; readers can use the quick start without permission to publish. Use `python scripts/run_demo.py --data-only` to upload and verify without training. The command does not create projects, move W&B aliases, publish releases or deploy. CI keeps its existing read-only `dvc pull` / `dvc repro` flow.
+
+The DagsHub general storage bucket and its DVC remote are separate. A blank bucket upload panel is not proof of missing DVC data. The fresh-download verification above checks the actual DVC storage. DagsHub's named file browser additionally needs the Git-tracked `.dvc` pointers in its own Git repository.
 
 ```bash
 dvc pull       # download the exact data versions recorded in this commit
@@ -305,7 +328,7 @@ dvc dag        # draw the stages
 git add data/raw/opioid_raw_data.csv.dvc data/inference/opioid_infer_01.csv.dvc dvc.lock && git commit -m "Record pipeline run"
 ```
 
-First time: run `dvc pull`, then `dvc repro` (the remote is public for reading). To `dvc push` new data you need write access: configure your DagsHub token locally with `dvc remote modify dagshub --local auth basic`, `... --local user <user>` and `... --local password <token>` (written to `.dvc/config.local`, ignored by Git, never in `.env`). DVC is part of `environment.yml` and `conda-lock.yml`.
+First time: configure your own DagsHub credentials in ignored `.dvc/config.local` as shown in the quick start, run `dvc pull`, then `dvc repro`. The current HTTP endpoint requires authentication even for downloads from this public repository. Uploading with `dvc push` additionally requires write access to the destination repository; students publish into their own repositories. DVC is part of `environment.yml` and `conda-lock.yml`.
 
 > **Do not re-save the CSVs.** `dvc pull` returns the exact bytes recorded in the `.dvc` pointer. Opening a CSV in Excel or a text editor and saving it, or converting its line endings (Windows CRLF vs Linux LF), changes the md5 even if no value changed: `dvc status` then reports modified data and `dvc repro` rewrites the pointer to a version DagsHub does not have. If that happens, restore the original with `dvc checkout`.
 
