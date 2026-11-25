@@ -127,7 +127,7 @@ flake8
 pytest --cov=src --cov-branch
 
 # 5. Train, quality gate, test audit, save, batch inference (read-only access to reference data)
-dvc repro                       # for the publishing demo, use python scripts/run_demo.py instead
+dvc repro                       # use dvc repro --force to train again even when inputs are unchanged
 
 # 6. Serve the model locally and test it
 uvicorn src.api:app --reload
@@ -305,19 +305,21 @@ feature/* --PR--> dev --PR--> main --(person moves W&B alias prod, then publishe
 
 The reference DVC remote is `https://dagshub.com/phidesigner/3-mlops-CICD.dvc`, configured in `.dvc/config`. DVC caches and uploads the two input CSVs referenced by `data/raw/opioid_raw_data.csv.dvc` and `data/inference/opioid_infer_01.csv.dvc`. Git stores those small pointers, not the CSV contents. `dvc.yaml` declares the training pipeline and its outputs (`clean.csv`, `model.joblib`, `predictions.csv`). Those three outputs use `cache: false`: DVC records their fingerprints in `dvc.lock`, while the configured online training run uploads the actual output files to W&B. Commit the pointers and `dvc.lock` with the corresponding changes to data, settings or code.
 
-**Instructor demo: upload the data, verify retrieval, then train**
+**Standard demo: publish data during setup, then train**
 
-With the existing `mlops` environment active, run this once instead of a separate training command:
+With the existing `mlops` environment active, these commands have separate jobs:
 
 ```bash
-python scripts/run_demo.py
+dvc push                  # setup: upload the tracked input CSVs to DagsHub
+dvc status --cloud        # setup: confirm the cache and remote are in sync
+dvc repro --force         # training: run the pipeline and upload its results to W&B
 ```
 
-The command checks that both local CSVs match their recorded fingerprints, caches and uploads them to the configured DVC remote, downloads them into an empty temporary cache, verifies the downloaded bytes, then runs `dvc repro --force` for training and W&B uploads. It stops before training if data publication or verification fails. Uploads are idempotent: data already present is reused rather than duplicated.
+Upload the input data once during setup, and again only when its tracked contents change. A training-setting change does not require re-uploading unchanged input CSVs. `dvc repro --force` runs training even when inputs are unchanged and updates `dvc.lock`; it does not upload input data to DagsHub. The Python pipeline separately sends the configured metrics and output artifacts to W&B. Training can use CSVs already available locally without contacting DagsHub.
 
-The first run prompts privately for the DagsHub username and token if they are missing, and stores them only in ignored `.dvc/config.local`. Uploading requires write access to the configured repository; readers can use the quick start without permission to publish. Use `python scripts/run_demo.py --data-only` to upload and verify without training. The command does not create projects, move W&B aliases, publish releases or deploy. CI keeps its existing read-only `dvc pull` / `dvc repro` flow.
+The optional helper `python scripts/run_demo.py` combines data upload, verification through a download into an empty temporary cache, and `dvc repro --force`. It is not required for the normal demo or CI. Use its `--data-only` option for the stronger upload/download check without training. If credentials are missing, it prompts privately and saves them only in ignored `.dvc/config.local`. Uploading requires write access to the configured repository; readers can use the quick start without permission to publish. Neither command creates projects, promotes models, publishes releases or deploys. CI keeps its existing read-only `dvc pull` / `dvc repro` flow.
 
-The DagsHub general storage bucket and its DVC remote are separate. A blank bucket upload panel is not proof of missing DVC data. The fresh-download verification above checks the actual DVC storage. DagsHub's named file browser additionally needs the Git-tracked `.dvc` pointers in its own Git repository.
+The DagsHub general storage bucket and its DVC remote are separate. A blank bucket upload panel is not proof of missing DVC data. `dvc status --cloud` and the helper's fresh-download verification check the actual DVC storage. DagsHub's named file browser additionally needs the Git-tracked `.dvc` pointers in its own Git repository.
 
 ```bash
 dvc pull       # download the exact data versions recorded in this commit
