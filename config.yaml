@@ -113,7 +113,7 @@ api:
 
 wandb:
   enabled: true
-  project: "opioid-risk-classification"
+  project: "opioid-risk-classification_demo"
 
   name: "01-calibrated-logistic-regression-unweighted"
   job_type: "training-pipeline"
