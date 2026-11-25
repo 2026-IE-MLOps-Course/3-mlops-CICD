@@ -102,12 +102,42 @@ Publish the unweighted baseline as the first release and the approved balanced e
 
 ## 3. Quick start (about 10 minutes)
 
+Reference data: [dagshub.com/phidesigner/3-mlops-CICD](https://dagshub.com/phidesigner/3-mlops-CICD). The repository already points there through `.dvc/config`:
+
+```ini
+[core]
+    remote = dagshub
+['remote "dagshub"']
+    url = https://dagshub.com/phidesigner/3-mlops-CICD.dvc
+```
+
+Before the first data download, sign in to your own DagsHub account and configure ignored `.dvc/config.local` as shown below. The reference repository is public, but its current DVC HTTP endpoint requires authentication for downloads (an anonymous request returned HTTP 401). Keep the shared `.dvc/config` URL unchanged when retrieving the course data.
+
+The template includes [`.dvc/config.local.example`](.dvc/config.local.example) with placeholders, ready for each student's clone. Complete this setup before running `dvc pull`:
+
+1. Create or sign in to **your own DagsHub account**
+2. Open [DagsHub Settings > Tokens](https://dagshub.com/user/settings/tokens) and obtain your own token
+3. In VS Code Explorer, copy `.dvc/config.local.example` and name the copy **`config.local`** inside `.dvc/`. Keep the example file unchanged. If your clone already has `.dvc/config.local`, edit that file instead
+4. In `.dvc/config.local`, replace `YOUR_DAGSHUB_USERNAME` and `YOUR_DAGSHUB_TOKEN` with your own values, then save the file. Do not put credentials in `.dvc/config`, the example file, or `.env`
+5. Keep `.dvc/config` pointing to the course reference remote above, then continue with the environment and download commands below
+
+Your local file should have this structure, with both placeholders replaced:
+
+```ini
+['remote "dagshub"']
+    auth = basic
+    user = YOUR_DAGSHUB_USERNAME
+    password = YOUR_DAGSHUB_TOKEN
+```
+
+Git ignores `.dvc/config.local`, so your credentials stay on your computer; clones and forks receive only the example. Never use the instructor's token. Download the reference data before changing the remote to your own repository: a newly created DagsHub repository has none of these data objects until you upload them with `dvc push`.
+
 ```bash
 # 1. Create and activate the environment (exact versions, same as CI and Docker)
 conda-lock install --name mlops conda-lock.yml   # or: conda env create -f environment.yml
 conda activate mlops
 
-# 2. Pull the exact data versions (the DagsHub repo is public: no account or token needed to read)
+# 2. Pull the exact data versions using your local DagsHub authentication
 dvc pull
 
 # 3. Add your secrets (never commit .env)
@@ -117,13 +147,15 @@ cp .env.example .env            # then edit .env
 flake8
 pytest --cov=src --cov-branch
 
-# 5. Run the full pipeline: train, quality gate, test audit, save, batch inference
-dvc repro                       # or: python -m src.main
+# 5. Train, quality gate, test audit, save, batch inference (read-only access to reference data)
+dvc repro                       # use dvc repro --force to train again even when inputs are unchanged
 
 # 6. Serve the model locally and test it
 uvicorn src.api:app --reload
 python scripts/smoke_test.py --url http://127.0.0.1:8000
 ```
+
+After `dvc pull`, both `data/raw/opioid_raw_data.csv` and `data/inference/opioid_infer_01.csv` must exist. If DVC ends with `Checkout failed`, the download failed even if an earlier line says `Everything is up to date`. Check the reference remote URL and your local authentication before training; do not recreate or re-save the CSVs.
 
 > **Windows:** always run inside the activated environment (`conda activate mlops`, then `python -m src.main`), or use `conda run -n mlops python -m src.main`. Calling the environment's `python.exe` directly, for example from a VS Code interpreter that did not activate the environment, can crash with `0xC06D007F` during model calibration because Windows cannot find the environment's maths libraries.
 
@@ -294,7 +326,23 @@ feature/* --PR--> dev --PR--> main --(person moves W&B alias prod, then publishe
 
 ### Data and pipeline versioning: DagsHub, `.dvc` pointers, `dvc.yaml` and `dvc.lock`
 
-The raw and inference CSV files live on DagsHub (`https://dagshub.com/phidesigner/3-mlops-CICD.dvc`). Git stores only their `.dvc` pointer files (`data/raw/opioid_raw_data.csv.dvc` and `data/inference/opioid_infer_01.csv.dvc`); the CSVs themselves are ignored by Git. `dvc.yaml` declares the whole pipeline as one stage: its inputs (`src/`, `config.yaml`, the raw and inference CSV files) and its outputs (`clean.csv`, `model.joblib`, `predictions.csv`). `dvc.lock` records the md5 of each one. Commit `.dvc` pointers and `dvc.lock` with every change to data, settings or code, and any commit tells you exactly which data its model came from.
+The reference DVC remote is `https://dagshub.com/phidesigner/3-mlops-CICD.dvc`, configured in `.dvc/config`. DVC caches and uploads the two input CSVs referenced by `data/raw/opioid_raw_data.csv.dvc` and `data/inference/opioid_infer_01.csv.dvc`. Git stores those small pointers, not the CSV contents. `dvc.yaml` declares the training pipeline and its outputs (`clean.csv`, `model.joblib`, `predictions.csv`). Those three outputs use `cache: false`: DVC records their fingerprints in `dvc.lock`, while the configured online training run uploads the actual output files to W&B. Commit the pointers and `dvc.lock` with the corresponding changes to data, settings or code.
+
+**Standard demo: publish data during setup, then train**
+
+With the existing `mlops` environment active, these commands have separate jobs:
+
+```bash
+dvc push                  # setup: upload the tracked input CSVs to DagsHub
+dvc status --cloud        # setup: confirm the cache and remote are in sync
+dvc repro --force         # training: run the pipeline and upload its results to W&B
+```
+
+Upload the input data once during setup, and again only when its tracked contents change. A training-setting change does not require re-uploading unchanged input CSVs. `dvc repro --force` runs training even when inputs are unchanged and updates `dvc.lock`; it does not upload input data to DagsHub. The Python pipeline separately sends the configured metrics and output artifacts to W&B. Training can use CSVs already available locally without contacting DagsHub.
+
+The optional helper `python scripts/run_demo.py` combines data upload, verification through a download into an empty temporary cache, and `dvc repro --force`. It is not required for the normal demo or CI. Use its `--data-only` option for the stronger upload/download check without training. If credentials are missing, it prompts privately and saves them only in ignored `.dvc/config.local`. Uploading requires write access to the configured repository; readers can use the quick start without permission to publish. Neither command creates projects, promotes models, publishes releases or deploys. CI keeps its existing read-only `dvc pull` / `dvc repro` flow.
+
+The DagsHub general storage bucket and its DVC remote are separate. A blank bucket upload panel is not proof of missing DVC data. `dvc status --cloud` and the helper's fresh-download verification check the actual DVC storage. DagsHub's named file browser additionally needs the Git-tracked `.dvc` pointers in its own Git repository.
 
 ```bash
 dvc pull       # download the exact data versions recorded in this commit
@@ -305,7 +353,7 @@ dvc dag        # draw the stages
 git add data/raw/opioid_raw_data.csv.dvc data/inference/opioid_infer_01.csv.dvc dvc.lock && git commit -m "Record pipeline run"
 ```
 
-First time: run `dvc pull`, then `dvc repro` (the remote is public for reading). To `dvc push` new data you need write access: configure your DagsHub token locally with `dvc remote modify dagshub --local auth basic`, `... --local user <user>` and `... --local password <token>` (written to `.dvc/config.local`, ignored by Git, never in `.env`). DVC is part of `environment.yml` and `conda-lock.yml`.
+First time: configure your own DagsHub credentials in ignored `.dvc/config.local` as shown in the quick start, run `dvc pull`, then `dvc repro`. The current HTTP endpoint requires authentication even for downloads from this public repository. Uploading with `dvc push` additionally requires write access to the destination repository; students publish into their own repositories. DVC is part of `environment.yml` and `conda-lock.yml`.
 
 > **Do not re-save the CSVs.** `dvc pull` returns the exact bytes recorded in the `.dvc` pointer. Opening a CSV in Excel or a text editor and saving it, or converting its line endings (Windows CRLF vs Linux LF), changes the md5 even if no value changed: `dvc status` then reports modified data and `dvc repro` rewrites the pointer to a version DagsHub does not have. If that happens, restore the original with `dvc checkout`.
 
@@ -448,9 +496,10 @@ Format: [Keep a Changelog](https://keepachangelog.com), versions follow [Semanti
 
 ### [3.0.1] - 2026-11-23
 
-- Package the API with W&B model artifact `idiazl/opioid-risk-classification/opioid_classification_model:v1`
-- Use calibrated logistic regression without automatic class weighting (`class_weight: null`)
-- The model passed the validation quality gate; this release exercises deployment of a different model and rollback to `v3.0.0`
+- Select W&B model artifact `idiazl/opioid-risk-classification/opioid_classification_model:v1` for packaging with the API, using calibrated logistic regression without automatic class weighting (`class_weight: null`)
+- The selected model passed the validation quality gate; this private rehearsal tests a model switch rather than a validation improvement over the balanced v0 model
+- Publishing GitHub release `v3.0.1` starts CI, image build and smoke testing, GHCR publication as `ghcr.io/2026-ie-mlops-course/3-mlops-cicd:3.0.1`, and deployment through the Render hook after the preceding checks pass; Render Auto-Deploy can remain disabled
+- Keep image `3.0.0`, containing the stronger balanced model `opioid_classification_model:v0`, available for the planned rollback; deployment, rollback and monitoring require separate verification
 
 ### [3.0.0] - 2026-11-17
 
