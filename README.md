@@ -102,7 +102,18 @@ Publish the unweighted baseline as the first release and the approved balanced e
 
 ## 3. Quick start (about 10 minutes)
 
+Reference data: [dagshub.com/phidesigner/3-mlops-CICD](https://dagshub.com/phidesigner/3-mlops-CICD). The repository already points there through `.dvc/config`:
+
+```ini
+[core]
+    remote = dagshub
+['remote "dagshub"']
+    url = https://dagshub.com/phidesigner/3-mlops-CICD.dvc
+```
+
 Before the first data download, sign in to your own DagsHub account and configure ignored `.dvc/config.local` as shown below. The reference repository is public, but its current DVC HTTP endpoint requires authentication for downloads (an anonymous request returned HTTP 401). Keep the shared `.dvc/config` URL unchanged when retrieving the course data.
+
+Each student uses their own username and token from [DagsHub Settings > Tokens](https://dagshub.com/user/settings/tokens), never the instructor's token. Create `.dvc/config.local` locally; Git does not include it when you clone or fork. Download the reference data before changing the remote to your own repository: a newly created DagsHub repository has none of these data objects until you upload them with `dvc push`.
 
 ```ini
 ['remote "dagshub"']
@@ -133,6 +144,8 @@ dvc repro                       # use dvc repro --force to train again even when
 uvicorn src.api:app --reload
 python scripts/smoke_test.py --url http://127.0.0.1:8000
 ```
+
+After `dvc pull`, both `data/raw/opioid_raw_data.csv` and `data/inference/opioid_infer_01.csv` must exist. If DVC ends with `Checkout failed`, the download failed even if an earlier line says `Everything is up to date`. Check the reference remote URL and your local authentication before training; do not recreate or re-save the CSVs.
 
 > **Windows:** always run inside the activated environment (`conda activate mlops`, then `python -m src.main`), or use `conda run -n mlops python -m src.main`. Calling the environment's `python.exe` directly, for example from a VS Code interpreter that did not activate the environment, can crash with `0xC06D007F` during model calibration because Windows cannot find the environment's maths libraries.
 
