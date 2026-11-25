@@ -113,7 +113,15 @@ Reference data: [dagshub.com/phidesigner/3-mlops-CICD](https://dagshub.com/phide
 
 Before the first data download, sign in to your own DagsHub account and configure ignored `.dvc/config.local` as shown below. The reference repository is public, but its current DVC HTTP endpoint requires authentication for downloads (an anonymous request returned HTTP 401). Keep the shared `.dvc/config` URL unchanged when retrieving the course data.
 
-Each student uses their own username and token from [DagsHub Settings > Tokens](https://dagshub.com/user/settings/tokens), never the instructor's token. Create `.dvc/config.local` locally; Git does not include it when you clone or fork. Download the reference data before changing the remote to your own repository: a newly created DagsHub repository has none of these data objects until you upload them with `dvc push`.
+The template includes [`.dvc/config.local.example`](.dvc/config.local.example) with placeholders, ready for each student's clone. Complete this setup before running `dvc pull`:
+
+1. Create or sign in to **your own DagsHub account**
+2. Open [DagsHub Settings > Tokens](https://dagshub.com/user/settings/tokens) and obtain your own token
+3. In VS Code Explorer, copy `.dvc/config.local.example` and name the copy **`config.local`** inside `.dvc/`. Keep the example file unchanged. If your clone already has `.dvc/config.local`, edit that file instead
+4. In `.dvc/config.local`, replace `YOUR_DAGSHUB_USERNAME` and `YOUR_DAGSHUB_TOKEN` with your own values, then save the file. Do not put credentials in `.dvc/config`, the example file, or `.env`
+5. Keep `.dvc/config` pointing to the course reference remote above, then continue with the environment and download commands below
+
+Your local file should have this structure, with both placeholders replaced:
 
 ```ini
 ['remote "dagshub"']
@@ -121,6 +129,8 @@ Each student uses their own username and token from [DagsHub Settings > Tokens](
     user = YOUR_DAGSHUB_USERNAME
     password = YOUR_DAGSHUB_TOKEN
 ```
+
+Git ignores `.dvc/config.local`, so your credentials stay on your computer; clones and forks receive only the example. Never use the instructor's token. Download the reference data before changing the remote to your own repository: a newly created DagsHub repository has none of these data objects until you upload them with `dvc push`.
 
 ```bash
 # 1. Create and activate the environment (exact versions, same as CI and Docker)
